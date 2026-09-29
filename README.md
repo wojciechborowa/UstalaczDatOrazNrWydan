@@ -115,6 +115,28 @@ wierszy, weryfikacja obejmie właśnie je.
 Datę można wpisać jako `RRRR-MM-DD` albo `DD.MM.RRRR`. Przycisk *Otwórz w przeglądarce
 PDF* otwiera plik w programie systemowym.
 
+## Import raportów CSV z innego programu
+
+*Plik → Importuj raporty CSV…* wczytuje raporty dat (np. `raport_dat.csv`) — jeden albo
+wiele naraz, nazwy dowolne. Kolejne importy dokładają wiedzę do poprzednich.
+Wymagana jest kolumna `data_koncowa` oraz co najmniej jedna z `skrot`, `sciezka`, `plik`.
+
+Pliki z listy są dopasowywane do wierszy raportu po kolei:
+1. **skrót pliku** (`skrot`, np. `h2:…`) — liczony tak samo jak w programie, który zrobił
+   raport (MD5 z rozmiaru + 256 kB początku + 256 kB końca). Działa mimo zmiany nazwy
+   i przeniesienia pliku,
+2. pełna ścieżka,
+3. nazwa pliku + rozmiar.
+
+Co się dzieje z dopasowanym rekordem:
+- wiersz **pewny** → data, numer (z dopiskiem `bis`/`special`) i tytuł trafiają do
+  rekordu, status „z raportu”, rekord zostaje odznaczony, więc nie idzie już do AI,
+- wiersz **wątpliwy / brak** → podpowiedź w uwagach, rekord trafia do „do sprawdzenia”,
+- **raporty podają różne dane** dla tego samego pliku → rekord trafia do „do sprawdzenia”,
+- rekord **poprawiony ręcznie** nie jest nadpisywany.
+
+Skróty liczone są w tle i zapamiętywane w sesji, więc kolejny import ich nie przelicza.
+
 ## Bezpieczeństwo danych
 
 Klucz API leży w `~/.gazeta_ai/config.json` z prawami 600 i **nie trafia do pliku sesji** —
@@ -145,6 +167,7 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | Plik | Rola |
 |---|---|
 | `app.py` | GUI: tabela, zakładki, paski postępu, sesje, dialogi |
+| `report_import.py` | import raportów CSV z innego programu, skrót pliku `h2` |
 | `verify.py` | okno weryfikacji: duży podgląd strony + poprawka ręczna |
 | `worker.py` | wątek roboczy: batche, cache, pauza/stop, zdarzenia do GUI |
 | `openrouter_client.py` | HTTP, lista modeli, limit zapytań, ponawianie |

@@ -22,6 +22,8 @@ ZOOM_MIN, ZOOM_MAX = 0.05, 8.0
 
 def needs_check(r: dict) -> bool:
     """Czy rekord powinien trafic do weryfikacji recznej."""
+    if r.get("report_flag"):
+        return True
     st = (r.get("status") or "").lower()
     if st == "nowy" or "recznie" in st or "zmieniono" in st or "cofnieto" in st:
         return False

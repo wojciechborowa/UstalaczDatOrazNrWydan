@@ -4,6 +4,7 @@ Uruchomienie:  python app.py
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -16,6 +17,7 @@ import cache_db
 import export
 import naming
 import rename_ops
+import report_import
 import render
 import session as session_io
 import validate
@@ -44,6 +46,7 @@ def make_record(path: Path) -> dict:
         "issue_suffix": None, "page_number": None, "is_cover": None,
         "confidence": None, "new_name": "", "status": "nowy", "note": "",
         "raw": "", "model": None, "outlier": False, "outlier_info": "",
+        "h2": None, "size": None, "report_flag": False,
     }
 
 
@@ -66,6 +69,8 @@ class App(tk.Tk):
         self._thumb_token = 0
         self._thumb_img = None
         self._busy = False
+        self.report_index = report_import.Index()
+        self._importing = False
 
         self.var_key = tk.StringVar(value=self.cfg.get("api_key", ""))
         self.var_model = tk.StringVar(value=self.cfg.get("model", ""))
@@ -96,6 +101,8 @@ class App(tk.Tk):
         f.add_command(label="Zapisz sesje", accelerator="Ctrl+S", command=self.save_session)
         f.add_command(label="Zapisz sesje jako...", accelerator="Ctrl+Shift+S",
                       command=self.save_session_as)
+        f.add_separator()
+        f.add_command(label="Importuj raporty CSV...", command=self.import_reports)
         f.add_separator()
         f.add_command(label="Eksport do CSV...", command=self.export_csv)
         f.add_command(label="Eksport do Excela...", command=self.export_xlsx)
@@ -494,11 +501,11 @@ class App(tk.Tk):
             return ("outlier",)
         if "blad" in st:
             return ("err",)
-        if st.startswith("brak danych"):
+        if st.startswith("brak danych") or r.get("report_flag"):
             return ("warn",)
         if "zmieniono" in st or "cofnieto" in st:
             return ("renamed",)
-        if st.startswith("odczytano"):
+        if st.startswith("odczytano") or st == "z raportu":
             return ("ok",)
         return ()
 
@@ -780,7 +787,11 @@ class App(tk.Tk):
         self.after(120, self.poll_queue)
 
     def _handle_event(self, kind: str, data: dict):
-        if kind == "record":
+        if kind == "report_progress":
+            self.set_progress(data["done"], data["total"], data["op"])
+        elif kind == "report_loaded":
+            self._reports_loaded(data)
+        elif kind == "record":
             r = data["rec"]
             self.compute_name(r)
             self.update_row(r)
@@ -823,6 +834,88 @@ class App(tk.Tk):
             if data["token"] == self._thumb_token:
                 self.lbl_thumb.config(image="", text=f"(podglad niedostepny)\n{data['error'][:80]}")
                 self._thumb_img = None
+
+    # =============================================================== raporty CSV
+    def import_reports(self):
+        """Wczytuje raporty CSV z innego programu i przenosi z nich daty i numery."""
+        if self._importing:
+            messagebox.showinfo(APP_NAME, "Import raportow juz trwa.")
+            return
+        if not self.records:
+            messagebox.showinfo(APP_NAME, "Najpierw dodaj pliki - raport uzupelnia "
+                                          "rekordy, ktore sa na liscie.")
+            return
+        paths = filedialog.askopenfilenames(
+            title="Wybierz raporty CSV",
+            filetypes=[("Raporty CSV", "*.csv"), ("Wszystkie pliki", "*.*")])
+        if not paths:
+            return
+        self._importing = True
+        # stan rekordow czytamy tu, w watku GUI; watek roboczy dostaje tylko kopie sciezek
+        need = [(r["path"], bool(r.get("h2")), r.get("size") is not None) for r in self.records]
+
+        def job():
+            loaded, errors = [], []
+            for i, p in enumerate(paths, start=1):
+                self.queue.put(("report_progress", {"done": i, "total": len(paths),
+                                                    "op": "Wczytywanie raportow"}))
+                try:
+                    loaded.append((p, report_import.load_report(p)))
+                except Exception as exc:
+                    errors.append(f"{Path(p).name}: {exc}")
+            want_hash = any(e["hash"] for _, rows in loaded for e in rows) \
+                or self.report_index.has_hashes()
+            hashes, sizes = {}, {}
+            for i, (path, has_h, has_s) in enumerate(need, start=1):
+                if want_hash and not has_h:
+                    hashes[path] = report_import.file_hash_h2(path)
+                if not has_s:
+                    try:
+                        sizes[path] = os.path.getsize(path)
+                    except OSError:
+                        pass
+                if i % 20 == 0 or i == len(need):
+                    self.queue.put(("report_progress", {"done": i, "total": len(need),
+                                                        "op": "Skroty plikow"}))
+            self.queue.put(("report_loaded", {"loaded": loaded, "errors": errors,
+                                              "hashes": hashes, "sizes": sizes}))
+
+        self.set_status("Import raportow...")
+        threading.Thread(target=job, daemon=True).start()
+
+    def _reports_loaded(self, data: dict):
+        self._importing = False
+        self.clear_progress()
+        for path, rows in data["loaded"]:
+            self.report_index.add(rows)
+            self.log(f"Raport {Path(path).name}: {len(rows)} wierszy.")
+        for r in self.records:
+            h = data["hashes"].get(r["path"])
+            if h:
+                r["h2"] = h
+            if r["path"] in data["sizes"]:
+                r["size"] = data["sizes"][r["path"]]
+        counts = {"pewne": 0, "watpliwe": 0, "sprzeczne": 0, "reczny": 0, "": 0}
+        for r in self.records:
+            res = report_import.apply(r, self.report_index.find(r))
+            counts[res] += 1
+            if res in ("pewne", "watpliwe"):
+                self.compute_name(r)
+        self.refresh_tree()
+        self.mark_dirty()
+        found = len(self.records) - counts[""]
+        msg = (f"Wczytano raportow: {len(data['loaded'])}\n\n"
+               f"Plikow z listy znalezionych w raportach: {found} z {len(self.records)}\n"
+               f"  - uzupelnione (pewne): {counts['pewne']}\n"
+               f"  - watpliwe w raporcie, do sprawdzenia: {counts['watpliwe']}\n"
+               f"  - raporty sie roznia, do sprawdzenia: {counts['sprzeczne']}\n"
+               f"  - pominiete (poprawione recznie): {counts['reczny']}")
+        if data["errors"]:
+            msg += "\n\nNie wczytano:\n" + "\n".join(data["errors"])
+        self.log(msg.replace("\n\n", " | ").replace("\n", " "))
+        self.set_status(f"Raporty: uzupelniono {counts['pewne']}, "
+                        f"do sprawdzenia {counts['watpliwe'] + counts['sprzeczne']}.")
+        messagebox.showinfo(APP_NAME, msg)
 
     # =============================================================== nazwy
     def compute_name(self, r: dict):
@@ -872,6 +965,7 @@ class App(tk.Tk):
     def _after_edit(self, r: dict):
         r["status"] = "poprawione recznie"
         r["note"] = ""
+        r["report_flag"] = False
         self.compute_name(r)
         self.update_row(r)
         self.mark_dirty()

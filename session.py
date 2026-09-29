@@ -11,6 +11,7 @@ SESSION_KEYS = [
     "title", "language", "date_iso", "date_raw", "month_raw", "year_printed",
     "issue_number", "issue_suffix", "page_number", "is_cover", "confidence",
     "new_name", "status", "note", "raw", "model", "outlier", "outlier_info",
+    "h2", "size", "report_flag",
 ]
 
 
