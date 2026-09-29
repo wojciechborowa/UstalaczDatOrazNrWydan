@@ -21,7 +21,7 @@ import report_import
 import render
 import session as session_io
 import validate
-from verify import VerifyDialog, needs_check
+from verify import VerifyDialog, needs_check, open_external
 from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS,
                     FREE_RPM, SESSION_EXT, load_config, save_config)
 from openrouter_client import FatalApiError, OpenRouterClient
@@ -125,6 +125,7 @@ class App(tk.Tk):
         t.add_separator()
         t.add_command(label="Przelicz nowe nazwy", command=self.recompute_all_names)
         t.add_command(label="Edytuj rekord...", command=self.edit_selected)
+        t.add_command(label="Otworz plik", accelerator="P", command=self.open_selected_files)
         t.add_command(label="Weryfikuj niepewne...", accelerator="Ctrl+W", command=self.open_verify)
         t.add_separator()
         t.add_command(label="Cofnij zmiane nazw...", command=self.undo_rename)
@@ -168,6 +169,7 @@ class App(tk.Tk):
         ttk.Button(top, text="Odznacz wszystko", command=lambda: self.set_all_checked(False)).pack(side="left", padx=3)
         ttk.Button(top, text="Odwroc", command=self.invert_checked).pack(side="left")
         ttk.Button(top, text="Zaznacz podswietlone", command=lambda: self.set_selected_checked(True)).pack(side="left", padx=3)
+        ttk.Button(top, text="Zaznacz widoczne", command=self.check_only_visible).pack(side="left")
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(top, text="Filtr:").pack(side="left")
@@ -222,6 +224,13 @@ class App(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<Double-1>", lambda e: self.edit_selected())
         self.tree.bind("<space>", self.on_space)
+        self.tree.bind("<p>", lambda e: self.open_selected_files())
+        self.tree.bind("<P>", lambda e: self.open_selected_files())
+        self.tree.bind("<Button-3>", self.on_tree_menu)
+        self.tree_menu = tk.Menu(self, tearoff=0)
+        self.tree_menu.add_command(label="Otworz plik  [P]", command=self.open_selected_files)
+        self.tree_menu.add_command(label="Edytuj rekord...", command=self.edit_selected)
+        self.tree_menu.add_command(label="Weryfikuj...", command=self.open_verify)
 
         right = ttk.Frame(paned)
         paned.add(right, weight=1)
@@ -557,6 +566,38 @@ class App(tk.Tk):
                 self.update_row(r)
         self.mark_dirty()
         return "break"
+
+    def check_only_visible(self):
+        """Zaznacza rekordy widoczne w tabeli (po filtrze), reszte odznacza."""
+        visible = {id(r) for r in self.by_iid.values()}
+        for r in self.records:
+            r["checked"] = id(r) in visible
+        self.refresh_tree()
+        self.mark_dirty()
+
+    def open_selected_files(self):
+        """Otwiera podswietlone pliki w domyslnym programie (np. przegladarce PDF)."""
+        recs = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
+        if not recs:
+            messagebox.showinfo(APP_NAME, "Podswietl wiersz, ktory chcesz otworzyc.")
+            return "break"
+        if len(recs) > 10 and not messagebox.askyesno(
+                APP_NAME, f"Otworzyc {len(recs)} plikow naraz?"):
+            return "break"
+        for r in recs:
+            try:
+                open_external(r["path"])
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Nie udalo sie otworzyc:\n{r['path']}\n\n{exc}")
+                break
+        return "break"
+
+    def on_tree_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid and iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        if self.tree.selection():
+            self.tree_menu.tk_popup(event.x_root, event.y_root)
 
     def set_all_checked(self, flag: bool):
         for r in self.records:

@@ -152,6 +152,7 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 | Ctrl+S | Zapisz sesję |
 | Ctrl+Shift+S | Zapisz sesję jako… |
 | Spacja | Przełącz zaznaczenie podświetlonych wierszy |
+| P | Otwórz podświetlony plik w domyślnym programie (też prawy przycisk myszy) |
 | F5 | Odśwież tabelę |
 | Ctrl+W | Weryfikacja niepewnych odczytów |
 
