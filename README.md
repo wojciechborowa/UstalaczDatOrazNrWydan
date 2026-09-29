@@ -120,24 +120,89 @@ Domyślne zasady: data tylko z winiety, żywej paginy lub stopki (nigdy z artyku
 reklam ani kalendarzy), bez zgadywania, bez tłumaczenia odczytu, a gdy kolejność
 dzień/miesiąc jest niejasna — obie możliwe daty w uwagach i rekord do sprawdzenia.
 
+## Kolory: co jest pewne, a co do sprawdzenia
+
+| Kolor | Znaczenie |
+|---|---|
+| zielony | **pewne** — można zmieniać nazwy |
+| pomarańczowy | do sprawdzenia |
+| czerwony | błąd odczytu |
+| niebieski | nazwa już zmieniona |
+| szary | jeszcze nieczytane |
+| pomarańczowe tło | niezgodne z kalendarzem wydań albo odstające w walidacji |
+
+Pewny (zielony) jest rekord poprawiony ręcznie, potwierdzony przez dwa niezależne źródła,
+pewny w zaimportowanym raporcie, zgodny z kalendarzem wydań albo odczytany przez AI
+z pewnością ≥ 0,80 bez żadnych zastrzeżeń. Filtry **„pewne”** i **„do sprawdzenia”**
+pokazują te grupy.
+
+**Pasek stanu kolekcji** nad tabelą pokazuje wszystkie pliki naraz (w kolejności tabeli),
+każdy w kolorze swojego stanu. Gdy na jeden punkt paska przypada kilka plików, widać
+najgorszy z nich. Kliknięcie przenosi do tego pliku w tabeli; najechanie myszą pokazuje,
+co to za plik. Pod paskiem są liczniki grup.
+
+## Kalendarz wydań
+
+Z pewnych par numer–data (raporty, rekordy ręczne i potwierdzone, pewne odczyty AI)
+program wylicza, jaka data powinna stać przy danym numerze: interpoluje między kilkoma
+najbliższymi pewnymi wydaniami i bierze medianę, więc jedna błędna kotwica nie psuje
+wyniku; restarty numeracji i numery specjalne są rozpoznawane. Przy sprawdzaniu rekordu
+jego własna wartość jest pomijana — zgodność znaczy „sąsiednie, niezależne wydania
+potwierdzają tę datę”.
+
+Na 3335 pewnych wydaniach France Football kalendarz przewidział datę poprawnie
+w 99,6% przypadków (test „z ukryciem” każdego wydania po kolei).
+
+Kalendarz sprawdza wyniki automatycznie po odczycie AI i imporcie raportów; ręcznie:
+*Narzędzia → Sprawdź z kalendarzem wydań*.
+
+## Dopracuj niepewne (jeden przycisk)
+
+Przycisk **Dopracuj niepewne** na dole okna:
+1. **Kalendarz wydań** (bez zapytań) — zgodne rekordy robią się zielone; brakującą datę
+   (przy znanym numerze) albo numer (przy znanej dacie) uzupełnia jako kandydata.
+2. **Drugi odczyt AI** tego, co dalej jest niepewne — wybranym dostawcą i modelem
+   (najlepiej innym niż za pierwszym razem), opcjonalnie obrazem dokładnym: wyższa
+   rozdzielczość i powiększona góra strony nad całą stroną, jeden plik na zapytanie.
+3. **Głosowanie** — rekord robi się pewny tylko, gdy zgadzają się dwa niezależne źródła
+   (dwa odczyty AI albo odczyt i kalendarz). Gdy dwa odczyty dają różne, ale każdy spójny
+   wynik, rekord zostaje do sprawdzenia z opisem obu wersji.
+4. **Podsumowanie** — ile zrobiło się pewnych, ile zostało do ręcznego sprawdzenia.
+
+*Narzędzia → Ponów odczyt podświetlonych (dokładniej)…* robi to samo dla wybranych
+wierszy, niezależnie od ich stanu.
+
 ## Weryfikacja niepewnych odczytów
 
-Przycisk **Weryfikuj (N)** nad tabelą (albo Ctrl+W) otwiera okno z dużym podglądem strony
-i polami do poprawki — po kolei dla każdego rekordu, który wymaga sprawdzenia: błąd, brak
-danych, pewność poniżej 0,80, rekord podejrzany w walidacji krzyżowej albo bez nowej nazwy.
-Te same rekordy pokazuje filtr **„do sprawdzenia”**. Gdy w tabeli podświetlisz kilka
+Przycisk **Weryfikuj (N)** (albo Ctrl+W) otwiera okno z dużym podglądem strony i polami
+do poprawki — po kolei dla rekordów „do sprawdzenia”. Gdy w tabeli podświetlisz kilka
 wierszy, weryfikacja obejmie właśnie je.
+
+Data ma osobne pola **dzień / miesiąc / rok**, pod nimi dzień tygodnia wpisanej daty
+(łatwo porównać z okładką). Program podpowiada datę i numer z kalendarza wydań albo
+z sąsiednich plików na liście — klawisz **P** przyjmuje podpowiedź. Podpowiedź odświeża
+się, gdy zmienisz numer wydania.
 
 | Klawisz | Działanie |
 |---|---|
 | Enter | zapisz i przejdź do następnego |
-| Esc / ↓ | pomiń |
-| ↑ | poprzedni rekord |
+| Tab | następne pole |
+| ↑ / ↓ w polu dnia, miesiąca, roku | o jeden w przód / w tył (z przejściem przez miesiąc i rok) |
+| P (w polach liczbowych) albo Alt+P | przyjmij podpowiedź |
+| Esc / Ctrl+↓ | pomiń |
+| Ctrl+↑ | poprzedni rekord |
 | PageUp / PageDown | poprzednia / następna strona PDF-a |
 | kółko myszy, przeciąganie | powiększenie, przesuwanie podglądu |
 
-Datę można wpisać jako `RRRR-MM-DD` albo `DD.MM.RRRR`. Przycisk *Otwórz w przeglądarce
-PDF* otwiera plik w programie systemowym.
+Przycisk *Otwórz w przeglądarce PDF* otwiera plik w programie systemowym.
+
+## Sesje
+
+- *Plik → Wczytaj ostatnią sesję* (Ctrl+Shift+O) i *Plik → Ostatnie sesje* (10 ostatnich).
+- *Zapisz sesję jako…* proponuje nazwę `Tytuł - RRRR-MM-DD - GG-MM`, np.
+  `France Football - 2026-09-30 - 01-37`, w folderze ostatniej sesji.
+- Wczytane raporty CSV obejmują też pliki dodane później — nie trzeba ich importować
+  ponownie.
 
 ## Import raportów CSV z innego programu
 
@@ -163,8 +228,13 @@ Skróty liczone są w tle i zapamiętywane w sesji, więc kolejny import ich nie
 
 ## Bezpieczeństwo danych
 
-Klucz API leży w `~/.gazeta_ai/config.json` z prawami 600 i **nie trafia do pliku sesji** —
-sesję można spokojnie komuś wysłać. Logi zmian nazw są w `~/.gazeta_ai/renames/`.
+Dane programu (klucze API, cache odpowiedzi, logi zmian nazw w `renames/`) leżą w:
+- Windows: `%APPDATA%\Czytnik wydan AI\` (Win+R, wpisz `%APPDATA%`),
+- Linux / macOS: `~/.gazeta_ai/`.
+
+Przy pierwszym uruchomieniu w Windows dane ze starego folderu `.gazeta_ai` są kopiowane
+do nowego (stary zostaje jako zapas). Klucze **nie trafiają do pliku sesji** — sesję
+można spokojnie komuś wysłać.
 Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich nie modyfikuje.
 
 ## Skróty klawiszowe
@@ -173,6 +243,7 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 |---|---|
 | Ctrl+N | Nowa sesja |
 | Ctrl+O | Otwórz sesję |
+| Ctrl+Shift+O | Wczytaj ostatnią sesję |
 | Ctrl+S | Zapisz sesję |
 | Ctrl+Shift+S | Zapisz sesję jako… |
 | Spacja | Przełącz zaznaczenie podświetlonych wierszy |
@@ -202,6 +273,9 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | `render.py` | PDF/obraz → JPEG w base64 (rasteryzacja, nie OCR) |
 | `naming.py` | budowa nazw plików, kolizje |
 | `validate.py` | walidacja krzyżowa, uzupełnianie roku, nazwy miesięcy |
+| `calendar_model.py` | kalendarz wydań: numer → data i odwrotnie |
+| `refine.py` | dopracowanie niepewnych: uzupełnianie z kalendarza, głosowanie źródeł |
+| `collection_map.py` | pasek stanu kolekcji |
 | `rename_ops.py` | zmiana nazw z logiem i cofaniem |
 | `cache_db.py` | cache SQLite po odcisku pliku |
 | `session.py`, `export.py`, `config.py` | sesje, CSV/XLSX, ustawienia |
@@ -210,10 +284,11 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 
 1. Puść 20–30 plików, obejrzyj wyniki i porównaj z miniaturami.
 2. Dopiero potem ruszaj z całością.
-3. Po odczycie: *Sprawdź spójność* → *Uzupełnij brakujące lata* → przejrzyj filtr
-   „podejrzane" i „brak danych", popraw ręcznie.
-4. Eksportuj do Excela jako kopię bezpieczeństwa.
-5. Na końcu *Zmień nazwy*.
+3. Jeśli masz raporty z innego programu — *Plik → Importuj raporty CSV…*.
+4. *Dopracuj niepewne* — kalendarz wydań i drugi odczyt AI zazielenią większość.
+5. *Weryfikuj* — resztę przejdź ręcznie (Enter, P).
+6. Eksportuj do Excela jako kopię bezpieczeństwa.
+7. Filtr „pewne” → *Zaznacz widoczne* → *Zmień nazwy*.
 
 Gotyckie winiety (starszy Kicker) i mocno stylizowane liternictwo wychodzą gorzej —
 takie wiersze warto ponowić na innym modelu.

@@ -117,10 +117,32 @@ def stamp_id(img: Image.Image, ident: str) -> Image.Image:
     return out
 
 
+DETAIL_DPI = 240
+DETAIL_TOP = 0.35      # jaka czesc strony (od gory) powiekszamy w trybie dokladnym
+
+
+def detail_image(path: str | Path, width: int = 1600) -> Image.Image:
+    """Obraz do dokladnego odczytu: powiekszony gorny pas strony (winieta z data
+    i numerem), pod nim cala strona. Model widzi szczegoly i kontekst naraz."""
+    page = load_first_page(path, dpi=DETAIL_DPI)
+    w, h = page.size
+    top = page.crop((0, 0, w, max(1, int(h * DETAIL_TOP))))
+    top = top.resize((width, max(1, int(top.size[1] * width / w))), Image.LANCZOS)
+    full = _fit(page, max(width, 1400))
+    if full.size[0] > width:
+        full = full.resize((width, int(full.size[1] * width / full.size[0])), Image.LANCZOS)
+    gap = 12
+    out = Image.new("RGB", (width, top.size[1] + gap + full.size[1]), (150, 150, 150))
+    out.paste(top, (0, 0))
+    out.paste(full, ((width - full.size[0]) // 2, top.size[1] + gap))
+    return out
+
+
 def to_jpeg_b64(path: str | Path, ident: str | None = None,
-                max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI) -> str:
+                max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI,
+                detail: bool = False) -> str:
     """Pierwsza strona jako JPEG w base64, opcjonalnie z paskiem identyfikatora."""
-    img = _fit(load_first_page(path, dpi=dpi), max_dim)
+    img = detail_image(path) if detail else _fit(load_first_page(path, dpi=dpi), max_dim)
     if ident:
         img = stamp_id(img, ident)
     buf = io.BytesIO()

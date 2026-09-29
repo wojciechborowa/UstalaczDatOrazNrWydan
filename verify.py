@@ -5,6 +5,7 @@ dalej, Esc / strzalki pomijaja rekord, PageUp/PageDown zmieniaja strone PDF-a.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import subprocess
 import sys
@@ -16,23 +17,59 @@ import naming
 import render
 from config import VERIFY_CONFIDENCE, VERIFY_DPI
 
+MONTHS = ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca",
+          "sierpnia", "wrzesnia", "pazdziernika", "listopada", "grudnia"]
+WEEKDAYS = ["poniedzialek", "wtorek", "sroda", "czwartek", "piatek", "sobota", "niedziela"]
 ZOOM_STEP = 1.2
 ZOOM_MIN, ZOOM_MAX = 0.05, 8.0
 
 
 def needs_check(r: dict) -> bool:
-    """Czy rekord powinien trafic do weryfikacji recznej."""
-    if r.get("report_flag"):
-        return True
+    """Czy rekord powinien trafic do weryfikacji recznej.
+
+    Pewne (nie wymagaja sprawdzenia): poprawione recznie, potwierdzone przez dwa
+    niezalezne zrodla, pewne z raportu, zgodne z kalendarzem wydan, albo odczyt AI
+    z wysoka pewnoscia, bez zadnych zastrzezen.
+    """
     st = (r.get("status") or "").lower()
     if st == "nowy" or "recznie" in st or "zmieniono" in st or "cofnieto" in st:
         return False
-    if "blad" in st or st.startswith("brak danych") or r.get("outlier"):
+    if st == "potwierdzone":
+        return False
+    if (r.get("report_flag") or r.get("vote_conflict") or r.get("cal_filled")
+            or r.get("cal_state") == "conflict"):
+        return True
+    if "blad" in st or st.startswith("brak danych"):
+        return True
+    if not r.get("new_name"):
+        return True
+    if r.get("cal_state") == "ok":
+        return False
+    if r.get("outlier") or "niejednoznaczna" in (r.get("note") or ""):
         return True
     conf = r.get("confidence")
-    if conf is not None and conf < VERIFY_CONFIDENCE:
-        return True
-    return not r.get("new_name")
+    return conf is None or conf < VERIFY_CONFIDENCE
+
+
+# Grupy stanu - te same kolory w tabeli i na pasku kolekcji.
+GROUP_COLORS = {
+    "certain": "#2e8b3e",   # pewne - mozna zmieniac nazwy
+    "check": "#e09a1f",     # do sprawdzenia
+    "error": "#c0392b",     # blad odczytu
+    "renamed": "#2f6fb0",   # nazwa juz zmieniona
+    "new": "#c9cdd2",       # jeszcze nieczytane
+}
+
+
+def status_group(r: dict) -> str:
+    st = (r.get("status") or "").lower()
+    if "zmieniono" in st or "cofnieto" in st:
+        return "renamed"
+    if st in ("nowy", ""):
+        return "check" if r.get("report_flag") else "new"
+    if "blad" in st:
+        return "error"
+    return "check" if needs_check(r) else "certain"
 
 
 def open_external(path: str) -> None:
@@ -46,10 +83,9 @@ def open_external(path: str) -> None:
 
 
 class VerifyDialog(tk.Toplevel):
-    FIELDS = [("date_iso", "Data"), ("issue_number", "Nr wydania"),
-              ("issue_suffix", "Dopisek"), ("title", "Tytul")]
+    DIGIT_FIELDS = ("day", "month", "year", "issue_number")
 
-    def __init__(self, parent, records: list[dict], on_save, on_close):
+    def __init__(self, parent, records: list[dict], on_save, on_close, suggest=None):
         super().__init__(parent)
         self.title("Weryfikacja")
         self.geometry("1300x860")
@@ -57,6 +93,8 @@ class VerifyDialog(tk.Toplevel):
         self.transient(parent)
 
         self.records = records
+        self.suggest = suggest       # (rekord, numer, data) -> (data, numer, opis) albo None
+        self._sugg = None
         self.on_save = on_save
         self.on_close_cb = on_close
         self.idx = 0
@@ -129,22 +167,59 @@ class VerifyDialog(tk.Toplevel):
         form.pack(fill="x", padx=8)
         self.vars: dict[str, tk.StringVar] = {}
         self.entries: dict[str, ttk.Entry] = {}
-        for i, (key, label) in enumerate(self.FIELDS):
+        vcmd = (self.register(lambda t: t.isdigit() or t == ""), "%P")
+        big = ("TkDefaultFont", 13)
+
+        drow = ttk.Frame(form)
+        drow.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        for key, label, width in (("day", "Dzien", 3), ("month", "Miesiac", 3), ("year", "Rok", 5)):
+            box = ttk.Frame(drow)
+            box.pack(side="left", padx=(0, 10))
+            ttk.Label(box, text=label).pack(anchor="w")
+            v = tk.StringVar()
+            e = ttk.Entry(box, textvariable=v, width=width, font=big, justify="center",
+                          validate="key", validatecommand=vcmd)
+            e.pack()
+            self.vars[key], self.entries[key] = v, e
+        self.lbl_date = ttk.Label(form, text="", foreground="#00509e")
+        self.lbl_date.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        for i, (key, label) in enumerate((("issue_number", "Nr wydania"),
+                                          ("issue_suffix", "Dopisek"), ("title", "Tytul")), start=2):
             ttk.Label(form, text=label + ":").grid(row=i, column=0, sticky="e", pady=3)
             v = tk.StringVar()
-            e = ttk.Entry(form, textvariable=v, width=22, font=("TkDefaultFont", 11))
+            kw = {"validate": "key", "validatecommand": vcmd} if key == "issue_number" else {}
+            e = ttk.Entry(form, textvariable=v, width=22, font=("TkDefaultFont", 11), **kw)
             e.grid(row=i, column=1, sticky="we", padx=(6, 0), pady=3)
-            self.vars[key] = v
-            self.entries[key] = e
+            self.vars[key], self.entries[key] = v, e
         form.columnconfigure(1, weight=1)
-        ttk.Label(right, text="Data: RRRR-MM-DD albo DD.MM.RRRR", foreground="#666"
-                  ).pack(anchor="w", padx=8, pady=(2, 10))
+
+        for key in ("day", "month", "year"):
+            self.vars[key].trace_add("write", lambda *a: self._date_changed())
+        self.vars["issue_number"].trace_add("write", lambda *a: self._update_suggestion())
+        for key, step in (("day", "day"), ("month", "month"), ("year", "year")):
+            self.entries[key].bind("<Up>", lambda e, s=step: self._step(s, +1))
+            self.entries[key].bind("<Down>", lambda e, s=step: self._step(s, -1))
+        for key in self.DIGIT_FIELDS:
+            self.entries[key].bind("<p>", lambda e: self.take_suggestion())
+            self.entries[key].bind("<P>", lambda e: self.take_suggestion())
+            self.entries[key].bind("<FocusIn>", lambda e: e.widget.select_range(0, "end"))
+
+        sug = ttk.Frame(right)
+        sug.pack(fill="x", padx=8, pady=(6, 8))
+        self.lbl_sugg = ttk.Label(sug, text="", wraplength=340, justify="left", foreground="#0a6b2e")
+        self.lbl_sugg.pack(anchor="w")
+        self.btn_sugg = ttk.Button(sug, text="Przyjmij podpowiedz  [P]", command=self.take_suggestion)
+        self.btn_sugg.pack(anchor="w", pady=(3, 0))
+        ttk.Label(right, text="Tab - nastepne pole  ·  strzalki - dzien/miesiac/rok o jeden  ·  "
+                              "Ctrl+strzalki - poprzedni/nastepny plik", foreground="#666",
+                  wraplength=340, justify="left").pack(anchor="w", padx=8, pady=(0, 8))
 
         b = ttk.Frame(right)
         b.pack(fill="x", padx=8)
         ttk.Button(b, text="Zapisz i dalej  [Enter]", command=self.save_next).pack(fill="x")
         ttk.Button(b, text="Pomin  [Esc]", command=lambda: self.move(1)).pack(fill="x", pady=3)
-        ttk.Button(b, text="Poprzedni  [strzalka w gore]", command=lambda: self.move(-1)).pack(fill="x")
+        ttk.Button(b, text="Poprzedni  [Ctrl+strzalka w gore]", command=lambda: self.move(-1)).pack(fill="x")
         ttk.Button(b, text="Otworz w przegladarce PDF", command=self.open_file).pack(fill="x", pady=(12, 3))
         ttk.Button(b, text="Zakoncz weryfikacje", command=self.close).pack(fill="x", pady=(12, 0))
 
@@ -156,8 +231,9 @@ class VerifyDialog(tk.Toplevel):
         self.bind("<Return>", lambda e: self.save_next())
         self.bind("<KP_Enter>", lambda e: self.save_next())
         self.bind("<Escape>", lambda e: self.move(1))
-        self.bind("<Down>", lambda e: self.move(1))
-        self.bind("<Up>", lambda e: self.move(-1))
+        self.bind("<Control-Down>", lambda e: self.move(1))
+        self.bind("<Control-Up>", lambda e: self.move(-1))
+        self.bind("<Alt-p>", lambda e: self.take_suggestion())
         self.bind("<Prior>", lambda e: self.goto_page(self.page - 1))
         self.bind("<Next>", lambda e: self.goto_page(self.page + 1))
         self.canvas.bind("<Configure>", lambda e: self._redraw() if self._img is not None else None)
@@ -177,9 +253,10 @@ class VerifyDialog(tk.Toplevel):
         if r.get("outlier_info"):
             info.append(str(r["outlier_info"]))
         self.lbl_info.config(text="  |  ".join(info))
-        for key, v in self.vars.items():
+        for key in ("issue_number", "issue_suffix", "title"):
             val = r.get(key)
-            v.set("" if val is None else str(val))
+            self.vars[key].set("" if val is None else str(val))
+        self._set_date(r.get("date_iso"))
         self.txt.delete("1.0", "end")
         self.txt.insert("1.0", "\n".join([
             f"Data (org):  {r.get('date_raw') or ''}",
@@ -188,7 +265,8 @@ class VerifyDialog(tk.Toplevel):
             f"Nr strony:   {r.get('page_number') or ''}",
             "", str(r.get("raw") or ""),
         ]))
-        e = self.entries["date_iso"]
+        self._update_suggestion()
+        e = self.entries["day"]
         e.focus_set()
         e.select_range(0, "end")
         e.icursor("end")
@@ -208,19 +286,109 @@ class VerifyDialog(tk.Toplevel):
         self.show(n)
         return "break"
 
+    # ------------------------------------------------------------- pola daty
+    def _set_date(self, date_iso):
+        y = m = d = ""
+        if date_iso and naming.is_valid_date(date_iso):
+            y, m, d = date_iso.split("-")
+        self.vars["day"].set(d)
+        self.vars["month"].set(m)
+        self.vars["year"].set(y)
+
+    def _date(self) -> _dt.date | None:
+        try:
+            return _dt.date(int(self.vars["year"].get()), int(self.vars["month"].get()),
+                            int(self.vars["day"].get()))
+        except (ValueError, TypeError):
+            return None
+
+    def _date_changed(self):
+        d = self._date()
+        if d is None:
+            filled = any(self.vars[k].get() for k in ("day", "month", "year"))
+            self.lbl_date.config(text="niepelna albo bledna data" if filled else "",
+                                 foreground="#b00020")
+        else:
+            self.lbl_date.config(text=f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month - 1]} {d.year}",
+                                 foreground="#00509e")
+        if not self.vars["issue_number"].get():
+            self._update_suggestion()
+
+    def _step(self, what: str, delta: int):
+        d = self._date()
+        if d is not None:
+            if what == "day":
+                d = d + _dt.timedelta(days=delta)
+            elif what == "month":
+                m = d.month - 1 + delta
+                y, m = d.year + m // 12, m % 12 + 1
+                d = d.replace(year=y, month=m, day=min(d.day, 28 if m == 2 else 30 if m in (4, 6, 9, 11) else 31))
+            else:
+                try:
+                    d = d.replace(year=d.year + delta)
+                except ValueError:
+                    d = d.replace(year=d.year + delta, day=28)
+            self._set_date(d.isoformat())
+        else:
+            v = self.vars[what]
+            lim = {"day": (1, 31), "month": (1, 12), "year": (1800, 2100)}[what]
+            try:
+                n = int(v.get()) + delta
+            except ValueError:
+                n = lim[0] if what != "year" else 1950
+            n = max(lim[0], min(lim[1], n))
+            v.set(f"{n:02d}" if what != "year" else str(n))
+        self.entries[what].icursor("end")
+        return "break"
+
+    # -------------------------------------------------------------- podpowiedz
+    def _update_suggestion(self):
+        self._sugg = None
+        if self.suggest is not None:
+            d = self._date()
+            try:
+                self._sugg = self.suggest(self.records[self.idx], self.vars["issue_number"].get().strip(),
+                                          d.isoformat() if d else None)
+            except Exception:
+                self._sugg = None
+        if self._sugg:
+            date_iso, issue, basis = self._sugg
+            what = []
+            if date_iso:
+                what.append(date_iso)
+            if issue:
+                what.append(f"nr {issue}")
+            self.lbl_sugg.config(text=f"Podpowiedz: {', '.join(what)}\n({basis})")
+            self.btn_sugg.state(["!disabled"])
+        else:
+            self.lbl_sugg.config(text="Brak podpowiedzi - za malo pewnych wydan w poblizu.")
+            self.btn_sugg.state(["disabled"])
+
+    def take_suggestion(self):
+        if self._sugg:
+            date_iso, issue, _ = self._sugg
+            if issue and not self.vars["issue_number"].get():
+                self.vars["issue_number"].set(str(issue))
+            if date_iso:
+                self._set_date(date_iso)
+            self.entries["day"].focus_set()
+        return "break"
+
     def save_next(self):
         r = self.records[self.idx]
-        vals = {k: v.get().strip() for k, v in self.vars.items()}
-        if vals["date_iso"]:
-            iso = naming.normalize_date(vals["date_iso"])
-            if not iso:
-                messagebox.showwarning("Weryfikacja",
-                                       "Nie rozumiem daty. Wpisz RRRR-MM-DD albo DD.MM.RRRR.",
+        parts = [self.vars[k].get().strip() for k in ("day", "month", "year")]
+        date_iso = None
+        if any(parts):
+            d = self._date()
+            if d is None or not naming.is_valid_date(d.isoformat()):
+                messagebox.showwarning("Weryfikacja", "Data jest niepelna albo bledna - uzupelnij "
+                                       "dzien, miesiac i czterocyfrowy rok (albo wyczysc wszystkie trzy).",
                                        parent=self)
                 return "break"
-            vals["date_iso"] = iso
-        for k, v in vals.items():
-            r[k] = v or None
+            date_iso = d.isoformat()
+        r["date_iso"] = date_iso
+        for k in ("issue_number", "issue_suffix", "title"):
+            r[k] = self.vars[k].get().strip() or None
         self.on_save(r)
         self.saved += 1
         return self.move(1)

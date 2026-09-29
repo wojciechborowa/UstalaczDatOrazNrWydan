@@ -8,7 +8,25 @@ from pathlib import Path
 APP_NAME = "Czytnik wydan AI"
 APP_VERSION = "1.0"
 
-APP_DIR = Path.home() / ".gazeta_ai"
+LEGACY_APP_DIR = Path.home() / ".gazeta_ai"
+
+
+def _app_dir(windows: bool = os.name == "nt") -> Path:
+    """Folder danych programu: w Windows %APPDATA%\\Czytnik wydan AI, gdzie indziej
+    ~/.gazeta_ai. Dane ze starego folderu sa przenoszone przy pierwszym uruchomieniu."""
+    if not windows or not os.environ.get("APPDATA"):
+        return LEGACY_APP_DIR
+    new = Path(os.environ["APPDATA"]) / APP_NAME
+    if not new.exists() and LEGACY_APP_DIR.exists():
+        try:
+            import shutil
+            shutil.copytree(LEGACY_APP_DIR, new)   # kopia - stary folder zostaje jako zapas
+        except Exception:
+            return LEGACY_APP_DIR
+    return new
+
+
+APP_DIR = _app_dir()
 CONFIG_FILE = APP_DIR / "config.json"
 CACHE_DB = APP_DIR / "cache.sqlite"
 RENAME_LOG_DIR = APP_DIR / "renames"

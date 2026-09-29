@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -14,16 +15,20 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 import cache_db
+import calendar_model
+from collection_map import CollectionMap
 import export
 import naming
+import refine
 import rename_ops
 import report_import
 import render
 import session as session_io
 import validate
-from verify import VerifyDialog, needs_check, open_external
-from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS,
-                    FREE_RPM, PROVIDERS, SESSION_EXT, load_config, save_config)
+from verify import VerifyDialog, needs_check, open_external, status_group
+from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS, CONFIG_FILE,
+                    FREE_RPM, PROVIDERS, SESSION_EXT, VERIFY_CONFIDENCE,
+                    load_config, save_config)
 from gemini_client import FALLBACK_MODELS, GeminiClient
 from openrouter_client import FatalApiError, OpenRouterClient
 from prompt import DEFAULT_RULES
@@ -112,6 +117,10 @@ class App(tk.Tk):
         f = tk.Menu(m, tearoff=0)
         f.add_command(label="Nowa sesja", accelerator="Ctrl+N", command=self.new_session)
         f.add_command(label="Otworz sesje...", accelerator="Ctrl+O", command=self.open_session)
+        f.add_command(label="Wczytaj ostatnia sesje", accelerator="Ctrl+Shift+O",
+                      command=self.open_last_session)
+        self.menu_recent = tk.Menu(f, tearoff=0, postcommand=self._build_recent_menu)
+        f.add_cascade(label="Ostatnie sesje", menu=self.menu_recent)
         f.add_command(label="Zapisz sesje", accelerator="Ctrl+S", command=self.save_session)
         f.add_command(label="Zapisz sesje jako...", accelerator="Ctrl+Shift+S",
                       command=self.save_session_as)
@@ -136,6 +145,10 @@ class App(tk.Tk):
         t = tk.Menu(m, tearoff=0)
         t.add_command(label="Sprawdz spojnosc numer-data", command=self.run_cross_check)
         t.add_command(label="Uzupelnij brakujace lata", command=self.run_fill_years)
+        t.add_command(label="Sprawdz z kalendarzem wydan", command=lambda: self.apply_calendar(True))
+        t.add_command(label="Dopracuj niepewne...", command=self.open_refine)
+        t.add_command(label="Ponow odczyt podswietlonych (dokladniej)...",
+                      command=lambda: self.open_refine(selected=True))
         t.add_separator()
         t.add_command(label="Przelicz nowe nazwy", command=self.recompute_all_names)
         t.add_command(label="Edytuj rekord...", command=self.edit_selected)
@@ -182,13 +195,13 @@ class App(tk.Tk):
         ttk.Button(top, text="Zaznacz wszystko", command=lambda: self.set_all_checked(True)).pack(side="left")
         ttk.Button(top, text="Odznacz wszystko", command=lambda: self.set_all_checked(False)).pack(side="left", padx=3)
         ttk.Button(top, text="Odwroc", command=self.invert_checked).pack(side="left")
-        ttk.Button(top, text="Zaznacz podswietlone", command=lambda: self.set_selected_checked(True)).pack(side="left", padx=3)
-        ttk.Button(top, text="Zaznacz widoczne", command=self.check_only_visible).pack(side="left")
+        ttk.Button(top, text="Zazn. podswietlone", command=lambda: self.set_selected_checked(True)).pack(side="left", padx=3)
+        ttk.Button(top, text="Zazn. widoczne", command=self.check_only_visible).pack(side="left")
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(top, text="Filtr:").pack(side="left")
         cb = ttk.Combobox(top, textvariable=self.var_filter, width=16, state="readonly",
-                          values=["wszystkie", "do sprawdzenia", "zaznaczone", "nowe", "odczytane",
+                          values=["wszystkie", "do sprawdzenia", "pewne", "zaznaczone", "nowe", "odczytane",
                                   "brak danych", "bledy", "podejrzane", "bez nowej nazwy"])
         cb.pack(side="left", padx=3)
         cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_tree())
@@ -198,9 +211,10 @@ class App(tk.Tk):
         e.bind("<Return>", lambda ev: self.refresh_tree())
         ttk.Button(top, text="Filtruj", command=self.refresh_tree).pack(side="left", padx=3)
 
-        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
-        self.btn_verify = ttk.Button(top, text="Weryfikuj (0)", command=self.open_verify)
-        self.btn_verify.pack(side="left")
+
+        # ---- pasek stanu kolekcji
+        self.cmap = CollectionMap(self.tab_main, self.jump_to_record)
+        self.cmap.pack(fill="x", padx=4, pady=(0, 2))
 
         # ---- panel dzielony: tabela | podglad
         paned = ttk.PanedWindow(self.tab_main, orient="horizontal")
@@ -228,11 +242,13 @@ class App(tk.Tk):
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
 
-        self.tree.tag_configure("err", foreground="#b00020")
-        self.tree.tag_configure("warn", foreground="#a86400")
-        self.tree.tag_configure("ok", foreground="#0a6b2e")
-        self.tree.tag_configure("outlier", background="#ffe9c7")
+        # kolory grup: zielony = pewne, pomaranczowy = do sprawdzenia, czerwony = blad
+        self.tree.tag_configure("certain", foreground="#0a6b2e")
+        self.tree.tag_configure("check", foreground="#b36b00")
+        self.tree.tag_configure("error", foreground="#b00020")
         self.tree.tag_configure("renamed", foreground="#00509e")
+        self.tree.tag_configure("new", foreground="#555555")
+        self.tree.tag_configure("outlier", background="#ffe9c7")
 
         self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
@@ -268,6 +284,10 @@ class App(tk.Tk):
         self.btn_pause.pack(side="left", padx=3)
         self.btn_stop = ttk.Button(act, text="Stop", command=self.stop_read, state="disabled")
         self.btn_stop.pack(side="left")
+        self.btn_refine = ttk.Button(act, text="Dopracuj niepewne", command=self.open_refine)
+        self.btn_refine.pack(side="left", padx=(10, 0))
+        self.btn_verify = ttk.Button(act, text="Weryfikuj (0)", command=self.open_verify)
+        self.btn_verify.pack(side="left", padx=(3, 0))
 
         ttk.Separator(act, orient="vertical").pack(side="left", fill="y", padx=10)
         self.btn_rename = ttk.Button(act, text="Zmien nazwy", command=self.do_rename)
@@ -302,8 +322,8 @@ class App(tk.Tk):
         ttk.Button(row, text="Zapisz klucz", command=self.save_key).pack(side="left", padx=6)
         ttk.Button(row, text="Testuj klucz", command=self.test_key).pack(side="left")
 
-        ttk.Label(box, text="Klucze sa zapisywane lokalnie w ~/.gazeta_ai/config.json "
-                            "(prawa 600) i NIE trafiaja do pliku sesji.",
+        ttk.Label(box, text=f"Klucze sa zapisywane lokalnie w {CONFIG_FILE} "
+                            "i NIE trafiaja do pliku sesji.",
                   foreground="#555").pack(anchor="w", padx=8, pady=(0, 6))
 
         self.lbl_key_info = ttk.Label(box, text="", foreground="#0a6b2e", justify="left")
@@ -398,6 +418,7 @@ class App(tk.Tk):
         self.bind_all("<Control-Shift-S>", lambda e: self.save_session_as())
         self.bind_all("<Control-Shift-s>", lambda e: self.save_session_as())
         self.bind_all("<F5>", lambda e: self.refresh_tree())
+        self.bind_all("<Control-Shift-O>", lambda e: self.open_last_session())
         self.bind("<Control-w>", lambda e: self.open_verify())
         self.bind("<Control-W>", lambda e: self.open_verify())
 
@@ -470,6 +491,9 @@ class App(tk.Tk):
         self.refresh_tree()
         self.mark_dirty()
         self.set_status(f"{len(self.records)} plikow na liscie.")
+        if self.report_index.sources:
+            # wczytane wczesniej raporty od razu obejmuja tez nowe pliki
+            self._run_report_job([], quiet=True)
 
     def remove_checked(self):
         keep = [r for r in self.records if not r.get("checked")]
@@ -498,6 +522,8 @@ class App(tk.Tk):
         for r in self.records:
             st = (r.get("status") or "").lower()
             if f == "do sprawdzenia" and not needs_check(r):
+                continue
+            if f == "pewne" and status_group(r) not in ("certain", "renamed"):
                 continue
             if f == "zaznaczone" and not r.get("checked"):
                 continue
@@ -542,18 +568,10 @@ class App(tk.Tk):
         )
 
     def _row_tags(self, r: dict) -> tuple:
-        st = (r.get("status") or "").lower()
-        if r.get("outlier"):
-            return ("outlier",)
-        if "blad" in st:
-            return ("err",)
-        if st.startswith("brak danych") or r.get("report_flag"):
-            return ("warn",)
-        if "zmieniono" in st or "cofnieto" in st:
-            return ("renamed",)
-        if st.startswith("odczytano") or st == "z raportu":
-            return ("ok",)
-        return ()
+        tags = [status_group(r)]
+        if r.get("outlier") or r.get("cal_state") == "conflict" or r.get("vote_conflict"):
+            tags.append("outlier")
+        return tuple(tags)
 
     def refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
@@ -566,6 +584,7 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=iid, values=self._row_values(r),
                              tags=self._row_tags(r))
         self.update_verify_button()
+        self.cmap.set_records(self.records)
         checked = sum(1 for r in self.records if r.get("checked"))
         self.set_status(f"{len(self.records)} plikow, zaznaczonych {checked}, "
                         f"widocznych {len(self.by_iid)}")
@@ -574,7 +593,15 @@ class App(tk.Tk):
         iid = r.get("_iid")
         if iid and self.tree.exists(iid):
             self.tree.item(iid, values=self._row_values(r), tags=self._row_tags(r))
+        if not getattr(self, "_counts_pending", False):
+            # wiele zmian naraz (np. odczyt 2000 plikow) = jedno przeliczenie
+            self._counts_pending = True
+            self.after_idle(self._refresh_counts)
+
+    def _refresh_counts(self):
+        self._counts_pending = False
         self.update_verify_button()
+        self.cmap.redraw()
 
     def update_verify_button(self):
         n = sum(1 for r in self.records if needs_check(r))
@@ -603,6 +630,18 @@ class App(tk.Tk):
                 self.update_row(r)
         self.mark_dirty()
         return "break"
+
+    def jump_to_record(self, r: dict):
+        """Klikniecie w pasek kolekcji: pokaz ten plik w tabeli."""
+        if r.get("_iid") not in self.by_iid:
+            self.var_filter.set("wszystkie")
+            self.var_search.set("")
+            self.refresh_tree()
+        iid = r.get("_iid")
+        if iid and self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+            self.tree.see(iid)
 
     def check_only_visible(self):
         """Zaznacza rekordy widoczne w tabeli (po filtrze), reszte odznacza."""
@@ -698,6 +737,7 @@ class App(tk.Tk):
             f"Nr strony:   {r.get('page_number')}",
             f"Okladka:     {r.get('is_cover')}",
             f"Pewnosc:     {r.get('confidence')}",
+            f"Kalendarz:   {r.get('cal_info') or '-'}",
             f"Model:       {r.get('model')}",
             f"Status:      {r.get('status')}",
             f"Uwagi:       {r.get('note')}",
@@ -925,6 +965,7 @@ class App(tk.Tk):
         self.btn_pause.config(state="normal" if running else "disabled", text="Pauza")
         self.btn_stop.config(state="normal" if running else "disabled")
         self.btn_rename.config(state="disabled" if running else "normal")
+        self.btn_refine.config(state="disabled" if running else "normal")
 
     def toggle_pause(self):
         if not self.worker:
@@ -951,6 +992,8 @@ class App(tk.Tk):
         self.after(120, self.poll_queue)
 
     def _handle_event(self, kind: str, data: dict):
+        if kind == "record" and getattr(self, "_refine", None) is not None:
+            data["rec"]["_refined"] = True
         if kind == "report_progress":
             self.set_progress(data["done"], data["total"], data["op"])
         elif kind == "report_loaded":
@@ -989,6 +1032,10 @@ class App(tk.Tk):
             self.set_status(msg)
             self.recompute_all_names()
             self.run_cross_check(silent=True)
+            if getattr(self, "_refine", None) is not None:
+                self._finish_refine()
+            else:
+                self.apply_calendar()
         elif kind == "thumb":
             if data["token"] == self._thumb_token:
                 from PIL import ImageTk
@@ -1013,6 +1060,11 @@ class App(tk.Tk):
             title="Wybierz raporty CSV",
             filetypes=[("Raporty CSV", "*.csv"), ("Wszystkie pliki", "*.*")])
         if not paths:
+            return
+        self._run_report_job(list(paths), quiet=False)
+
+    def _run_report_job(self, paths: list[str], quiet: bool):
+        if self._importing:
             return
         self._importing = True
         # stan rekordow czytamy tu, w watku GUI; watek roboczy dostaje tylko kopie sciezek
@@ -1041,7 +1093,7 @@ class App(tk.Tk):
                 if i % 20 == 0 or i == len(need):
                     self.queue.put(("report_progress", {"done": i, "total": len(need),
                                                         "op": "Skroty plikow"}))
-            self.queue.put(("report_loaded", {"loaded": loaded, "errors": errors,
+            self.queue.put(("report_loaded", {"loaded": loaded, "errors": errors, "quiet": quiet,
                                               "hashes": hashes, "sizes": sizes}))
 
         self.set_status("Import raportow...")
@@ -1065,7 +1117,7 @@ class App(tk.Tk):
             counts[res] += 1
             if res in ("pewne", "watpliwe"):
                 self.compute_name(r)
-        self.refresh_tree()
+        self.apply_calendar()
         self.mark_dirty()
         found = len(self.records) - counts[""]
         msg = (f"Wczytano raportow: {len(data['loaded'])}\n\n"
@@ -1079,7 +1131,8 @@ class App(tk.Tk):
         self.log(msg.replace("\n\n", " | ").replace("\n", " "))
         self.set_status(f"Raporty: uzupelniono {counts['pewne']}, "
                         f"do sprawdzenia {counts['watpliwe'] + counts['sprzeczne']}.")
-        messagebox.showinfo(APP_NAME, msg)
+        if not data.get("quiet"):
+            messagebox.showinfo(APP_NAME, msg)
 
     # =============================================================== nazwy
     def compute_name(self, r: dict):
@@ -1119,7 +1172,42 @@ class App(tk.Tk):
         if not recs:
             messagebox.showinfo(APP_NAME, "Nie ma rekordow do sprawdzenia.")
             return
-        VerifyDialog(self, recs, self._after_edit, self._after_verify)
+        self._verify_cal = self.build_calendar()
+        VerifyDialog(self, recs, self._after_edit, self._after_verify, suggest=self.suggest_for)
+
+    def suggest_for(self, rec: dict, issue: str, date_iso: str | None):
+        """Podpowiedz do okna weryfikacji: (data, numer, skad) albo None."""
+        cal = getattr(self, "_verify_cal", None) or self.build_calendar()
+        title = rec.get("title") or self.var_title_override.get().strip()
+        if issue:
+            p = cal.predict(title, issue, rec.get("issue_suffix"), exclude=rec)
+            if p:
+                tol = f", +-{p.tol} dni" if p.tol else ""
+                return p.date_iso, issue, f"kalendarz wydan: {p.basis}{tol}"
+            return None
+        if date_iso:
+            got = cal.predict_issue(title, date_iso, exclude=rec)
+            if got:
+                return date_iso, got[0], f"kalendarz wydan: {got[1]}"
+            return None
+        # ani numeru, ani daty - numer z sasiednich plikow na liscie
+        try:
+            pos = self.records.index(rec)
+        except ValueError:
+            return None
+
+        def known(r):
+            n = calendar_model.issue_int(r.get("issue_number"))
+            return n if n is not None and not needs_check(r) else None
+        prev = next(((i, known(self.records[i])) for i in range(pos - 1, max(-1, pos - 6), -1)
+                     if known(self.records[i]) is not None), None)
+        nxt = next(((i, known(self.records[i])) for i in range(pos + 1, min(len(self.records), pos + 6))
+                    if known(self.records[i]) is not None), None)
+        if prev and nxt and nxt[1] - prev[1] == nxt[0] - prev[0]:
+            n = prev[1] + (pos - prev[0])
+            p = cal.predict(title, n, None, exclude=rec)
+            return (p.date_iso if p else None), n, "sasiednie pliki na liscie + kalendarz wydan"
+        return None
 
     def _after_verify(self, saved: int):
         self.refresh_tree()
@@ -1130,6 +1218,10 @@ class App(tk.Tk):
         r["status"] = "poprawione recznie"
         r["note"] = ""
         r["report_flag"] = False
+        r["vote_conflict"] = False
+        r["cal_filled"] = False
+        r["outlier"] = False
+        r["cal_state"], r["cal_info"] = None, ""
         self.compute_name(r)
         self.update_row(r)
         self.mark_dirty()
@@ -1162,6 +1254,128 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, f"Wynik walidacji numer-data:\n\n{text}\n\n"
                                           f"Podejrzane wiersze sa podswietlone.\n"
                                           f"Filtr 'podejrzane' pokaze tylko je.")
+
+    def build_calendar(self) -> calendar_model.Calendar:
+        entries = [e for lst in self.report_index.by_path.values() for e in lst]
+        # wiersze bez sciezki tez niosa wiedze
+        seen = {id(e) for e in entries}
+        entries += [e for lst in self.report_index.by_hash.values() for e in lst if id(e) not in seen]
+        return calendar_model.build(self.records, entries, VERIFY_CONFIDENCE)
+
+    def apply_calendar(self, show: bool = False) -> dict:
+        """Sprawdza odczytane rekordy z kalendarzem wydan (numer -> data)."""
+        cal = self.build_calendar()
+        counts = calendar_model.check_records(cal, self.records)
+        for r in self.records:
+            if r.get("cal_state") == "ok":
+                r["outlier"] = False   # lokalny kalendarz jest mocniejszy od prostej globalnej
+        self.refresh_tree()
+        msg = (f"Kalendarz wydan: {cal.anchors()} pewnych par numer-data. "
+               f"Zgodnych: {counts['ok']}, niezgodnych: {counts['conflict']}, "
+               f"bez oceny: {counts['none']}.")
+        self.log(msg)
+        if show:
+            messagebox.showinfo(APP_NAME, msg.replace(". ", ".\n") +
+                                "\n\nNiezgodne sa w filtrze 'do sprawdzenia'.")
+        return counts
+
+    # =============================================================== dopracowanie
+    def _provider_keys(self) -> dict:
+        """Dostawcy, dla ktorych jest zapisany klucz -> (klucz, model, rpm)."""
+        self._store_provider_fields(self.var_provider.get())
+        out = {}
+        for prov, (k_key, k_model, k_rpm, d_rpm) in PROVIDER_CFG.items():
+            if (self.cfg.get(k_key) or "").strip():
+                out[prov] = (self.cfg[k_key].strip(), self.cfg.get(k_model) or "",
+                             int(self.cfg.get(k_rpm, d_rpm)))
+        return out
+
+    def open_refine(self, selected: bool = False):
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo(APP_NAME, "Trwa odczyt - poczekaj, az sie skonczy.")
+            return
+        if selected:
+            recs = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
+            if not recs:
+                messagebox.showinfo(APP_NAME, "Podswietl wiersze do ponownego odczytu.")
+                return
+        else:
+            recs = [r for r in self.records if needs_check(r)]
+            if not recs:
+                messagebox.showinfo(APP_NAME, "Nie ma niepewnych rekordow.")
+                return
+        RefineDialog(self, recs, selected, self._provider_keys(), self.var_provider.get(),
+                     self._start_refine)
+
+    def _start_refine(self, recs: list[dict], force_all: bool, use_ai: bool,
+                      provider: str, model: str, detail: bool):
+        before = sum(1 for r in self.records if needs_check(r))
+        # krok 1: kalendarz wydan - bez zapytan
+        cal = self.build_calendar()
+        filled = refine.fill_from_calendar(cal, recs)
+        for r in recs:
+            self.compute_name(r)
+        self.apply_calendar()
+        after_cal = sum(1 for r in self.records if needs_check(r))
+        info = {"before": before, "after_cal": after_cal, "filled": filled}
+
+        todo = recs if force_all else [r for r in recs if needs_check(r)]
+        if not use_ai or not todo:
+            self._refine_report(info, None)
+            return
+        keys = self._provider_keys()
+        key, _m, rpm = keys[provider]
+        client = (GeminiClient if provider == "gemini" else OpenRouterClient)(key, model, rpm=rpm)
+        for r in todo:
+            refine.snapshot(r)
+            r["_refined"] = False
+        self._refine = {"recs": todo, "info": info, "model": model, "provider": provider}
+        self._set_running(True)
+        self.worker = ReadWorker(todo, client, model, self.queue,
+                                 batch_size=1 if detail else max(1, int(self.var_batch.get())),
+                                 use_cache=False, rules=self.cfg.get("prompt_rules"),
+                                 notes=self.cfg.get("collection_notes"), detail=detail)
+        self.worker.start()
+        self.log(f"Dopracowanie: drugi odczyt {len(todo)} plikow, {PROVIDERS[provider]}, "
+                 f"model {model}{', obraz dokladny' if detail else ''}.")
+
+    def _finish_refine(self):
+        ref, self._refine = self._refine, None
+        cal = self.build_calendar()
+        votes = {"potwierdzone": 0, "sprzeczne": 0}
+        for r in ref["recs"]:
+            if r.pop("_refined", False):
+                if (r.get("status") or "").startswith("blad"):
+                    # drugi odczyt sie nie udal - wracamy do pierwszego
+                    first = r.get("first") or {}
+                    for k in ("date_iso", "issue_number", "issue_suffix", "confidence", "title"):
+                        r[k] = first.get(k)
+                    r["cal_filled"] = bool(first.get("cal_filled"))
+                    r["status"] = "odczytano" if r.get("date_iso") else "brak danych"
+                    r["note"] = "drugi odczyt AI nieudany - zostaje pierwszy"
+                    continue
+                votes[refine.vote(cal, r)] += 1
+                self.compute_name(r)
+        self.apply_calendar()
+        self._refine_report(ref["info"], votes)
+
+    def _refine_report(self, info: dict, votes: dict | None):
+        self.refresh_tree()
+        self.mark_dirty()
+        now = sum(1 for r in self.records if needs_check(r))
+        lines = [f"Niepewnych przed: {info['before']}",
+                 f"Po kalendarzu wydan: {info['after_cal']}"
+                 + (f" (uzupelniono z kalendarza: {info['filled']})" if info["filled"] else "")]
+        if votes is not None:
+            lines.append(f"Drugi odczyt AI: potwierdzono {votes['potwierdzone']}, "
+                         f"sprzeczne {votes['sprzeczne']}")
+        lines.append(f"\nZostalo do recznego sprawdzenia: {now}")
+        if now:
+            lines.append("Przycisk 'Weryfikuj' przeprowadzi Cie przez nie po kolei.")
+        msg = "\n".join(lines)
+        self.log("Dopracowanie: " + msg.replace("\n", " | "))
+        self.set_status(f"Dopracowanie: do sprawdzenia zostalo {now}.")
+        messagebox.showinfo(APP_NAME, msg)
 
     def run_fill_years(self):
         n = validate.fill_missing_years(self.records)
@@ -1259,10 +1473,66 @@ class App(tk.Tk):
         if not self._confirm_discard():
             return
         path = filedialog.askopenfilename(
-            title="Otworz sesje",
+            title="Otworz sesje", initialdir=self._session_dir(),
             filetypes=[("Sesja programu", f"*{SESSION_EXT}"), ("Wszystkie pliki", "*.*")])
-        if not path:
+        if path:
+            self._load_session(path)
+
+    def open_last_session(self):
+        recent = self._recent_sessions()
+        if not recent:
+            messagebox.showinfo(APP_NAME, "Nie ma jeszcze zapisanych ani otwieranych sesji.")
             return
+        if self._confirm_discard():
+            self._load_session(recent[0])
+
+    def _open_recent(self, path: str):
+        if self._confirm_discard():
+            self._load_session(path)
+
+    def _recent_sessions(self) -> list[str]:
+        return [p for p in self.cfg.get("recent_sessions", []) if Path(p).exists()]
+
+    def _remember_session(self, path: str):
+        path = str(Path(path).resolve())
+        lst = [p for p in self.cfg.get("recent_sessions", []) if p != path]
+        self.cfg["recent_sessions"] = [path] + lst[:9]
+        save_config(self.cfg)
+
+    def _build_recent_menu(self):
+        self.menu_recent.delete(0, "end")
+        recent = self._recent_sessions()
+        if not recent:
+            self.menu_recent.add_command(label="(brak)", state="disabled")
+            return
+        for i, p in enumerate(recent, start=1):
+            pp = Path(p)
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(pp.stat().st_mtime))
+            self.menu_recent.add_command(label=f"{i}. {pp.stem}   ({stamp}, {pp.parent})",
+                                         command=lambda p=p: self._open_recent(p))
+
+    def _session_dir(self) -> str:
+        recent = self._recent_sessions()
+        if recent:
+            return str(Path(recent[0]).parent)
+        if self.records:
+            return str(Path(self.records[0]["path"]).parent)
+        return str(Path.home())
+
+    def default_session_name(self) -> str:
+        """'France Football - 2026-09-30 - 01-37' - tytul najczestszy na liscie."""
+        title = self.var_title_override.get().strip()
+        if not title:
+            counts: dict[str, int] = {}
+            for r in self.records:
+                t = (r.get("title") or "").strip()
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+            title = max(counts, key=counts.get) if counts else "Sesja"
+        title = re.sub(r'[\\/:*?"<>|]+', "-", title).strip(" .") or "Sesja"
+        return f"{title} - {time.strftime('%Y-%m-%d - %H-%M')}"
+
+    def _load_session(self, path: str):
         try:
             records, meta = session_io.load_session(path)
         except Exception as exc:
@@ -1270,13 +1540,15 @@ class App(tk.Tk):
             return
         self.records = records
         self.session_path = path
-        if meta.get("model"):
+        if meta.get("model") and meta.get("provider", "openrouter") == self.var_provider.get():
             self.var_model.set(meta["model"])
         if meta.get("title_override"):
             self.var_title_override.set(meta["title_override"])
         missing = sum(1 for r in self.records if not Path(r.get("path", "")).exists())
         self.refresh_tree()
         self.mark_dirty(False)
+        self._remember_session(path)
+        self.title(f"{APP_NAME} {APP_VERSION} - {Path(path).stem}")
         self.log(f"Wczytano sesje: {path} ({len(records)} rekordow, brakujacych plikow: {missing})")
         if missing:
             messagebox.showwarning(APP_NAME,
@@ -1291,6 +1563,8 @@ class App(tk.Tk):
     def save_session_as(self) -> bool:
         path = filedialog.asksaveasfilename(
             title="Zapisz sesje jako", defaultextension=SESSION_EXT,
+            initialdir=self._session_dir(),
+            initialfile=self.default_session_name() + SESSION_EXT,
             filetypes=[("Sesja programu", f"*{SESSION_EXT}")])
         if not path:
             return False
@@ -1298,7 +1572,7 @@ class App(tk.Tk):
         return self._write_session(path)
 
     def _write_session(self, path: str) -> bool:
-        meta = {"model": self.var_model.get(),
+        meta = {"model": self.var_model.get(), "provider": self.var_provider.get(),
                 "title_override": self.var_title_override.get(),
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
@@ -1307,6 +1581,8 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"Nie udalo sie zapisac sesji:\n{exc}")
             return False
         self.mark_dirty(False)
+        self._remember_session(path)
+        self.title(f"{APP_NAME} {APP_VERSION} - {Path(path).stem}")
         self.log(f"Zapisano sesje: {path}")
         self.set_status("Sesja zapisana.")
         return True
@@ -1438,14 +1714,90 @@ class EditDialog(tk.Toplevel):
 
     def ok(self):
         date = self.vars["date_iso"].get().strip()
-        if date and not naming.is_valid_date(date):
-            messagebox.showwarning("Edycja", "Data musi miec format RRRR-MM-DD.", parent=self)
-            return
+        if date:
+            iso = naming.normalize_date(date)
+            if not iso:
+                messagebox.showwarning("Edycja", "Nie rozumiem daty. Wpisz RRRR-MM-DD albo DD.MM.RRRR.",
+                                       parent=self)
+                return
+            self.vars["date_iso"].set(iso)
         for key, var in self.vars.items():
             val = var.get().strip()
             self.rec[key] = val or None
         self.on_ok(self.rec)
         self.destroy()
+
+
+class RefineDialog(tk.Toplevel):
+    """Ustawienia dopracowania niepewnych / ponownego odczytu podswietlonych."""
+
+    def __init__(self, parent: App, recs: list[dict], selected: bool, keys: dict,
+                 current: str, on_start):
+        super().__init__(parent)
+        self.title("Ponow odczyt" if selected else "Dopracuj niepewne")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.recs, self.selected, self.keys, self.on_start = recs, selected, keys, on_start
+        pad = {"padx": 12, "pady": 3}
+
+        head = (f"Podswietlonych rekordow: {len(recs)}" if selected
+                else f"Niepewnych rekordow: {len(recs)}")
+        ttk.Label(self, text=head, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        ttk.Label(self, text="1. Kalendarz wydan - sprawdza daty z numerami pewnych wydan "
+                             "(bez zapytan do AI).", wraplength=520, justify="left").pack(anchor="w", **pad)
+
+        self.var_ai = tk.BooleanVar(value=bool(keys))
+        ttk.Checkbutton(self, text="2. Drugi odczyt AI tych, ktore dalej sa niepewne"
+                        if not selected else "2. Ponowny odczyt AI",
+                        variable=self.var_ai).pack(anchor="w", **pad)
+        box = ttk.Frame(self)
+        box.pack(fill="x", padx=32)
+        self.var_prov = tk.StringVar(value=current if current in keys else next(iter(keys), ""))
+        for prov in PROVIDERS:
+            rb = ttk.Radiobutton(box, text=PROVIDERS[prov] + ("" if prov in keys else " (brak klucza)"),
+                                 value=prov, variable=self.var_prov, command=self._prov_changed)
+            rb.pack(anchor="w")
+            if prov not in keys:
+                rb.state(["disabled"])
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Model:").pack(side="left")
+        self.var_model = tk.StringVar()
+        ttk.Entry(row, textvariable=self.var_model, width=44).pack(side="left", padx=6)
+        ttk.Label(box, text="Najlepiej inny model niz przy pierwszym odczycie - wtedy zgodnosc "
+                            "dwoch odczytow cos znaczy.", foreground="#555", wraplength=480,
+                  justify="left").pack(anchor="w")
+        self.var_detail = tk.BooleanVar(value=True)
+        ttk.Checkbutton(box, text="obraz dokladny: wyzsza rozdzielczosc + powiekszona gora strony "
+                                  "(1 plik na zapytanie)", variable=self.var_detail
+                        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(self, text="3. Rekord robi sie pewny tylko, gdy zgadzaja sie dwa niezalezne zrodla "
+                             "(dwa odczyty AI albo odczyt i kalendarz). Sprzeczne zostaja do "
+                             "sprawdzenia z podpowiedzia.", wraplength=520, justify="left"
+                  ).pack(anchor="w", padx=12, pady=(8, 3))
+        if not keys:
+            ttk.Label(self, text="Brak zapisanego klucza API - zadziala tylko kalendarz wydan.",
+                      foreground="#b00020").pack(anchor="w", **pad)
+        btns = ttk.Frame(self)
+        btns.pack(pady=12)
+        ttk.Button(btns, text="Start", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
+        self._prov_changed()
+
+    def _prov_changed(self):
+        k = self.keys.get(self.var_prov.get())
+        self.var_model.set(k[1] if k else "")
+
+    def ok(self):
+        use_ai = self.var_ai.get() and self.var_prov.get() in self.keys
+        model = self.var_model.get().strip()
+        if use_ai and not model:
+            messagebox.showwarning(APP_NAME, "Podaj model do drugiego odczytu.", parent=self)
+            return
+        self.destroy()
+        self.on_start(self.recs, self.selected, use_ai, self.var_prov.get(), model,
+                      self.var_detail.get())
 
 
 class PromptDialog(tk.Toplevel):

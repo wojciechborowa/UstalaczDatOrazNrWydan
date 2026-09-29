@@ -54,7 +54,8 @@ class ReadWorker(threading.Thread):
 
     def __init__(self, records: list[dict], client: BaseClient, model: str, queue,
                  batch_size: int = BATCH_SIZE, use_cache: bool = True,
-                 rules: str | None = None, notes: str | None = None):
+                 rules: str | None = None, notes: str | None = None,
+                 detail: bool = False):
         super().__init__(daemon=True)
         self.records = records
         self.model = model
@@ -63,6 +64,12 @@ class ReadWorker(threading.Thread):
         self.use_cache = use_cache
         self.client = client
         self.rules = rules
+        self.detail = detail
+        if detail:
+            extra = ("Each image shows, below the identifier strip, first an ENLARGED top part "
+                     "of the page (where the masthead with date and issue number usually is), "
+                     "then a grey line, then the WHOLE page. Both show the same single page.")
+            notes = (notes + "\n" + extra) if notes else extra
         self.notes = notes
         self._seq = 0
 
@@ -108,7 +115,7 @@ class ReadWorker(threading.Thread):
         """(identyfikator, JPEG w base64) - identyfikator jest wypisany na obrazie."""
         self._seq += 1
         ident = f"{self._seq:05d}"
-        return ident, render.to_jpeg_b64(rec["path"], ident)
+        return ident, render.to_jpeg_b64(rec["path"], ident, detail=self.detail)
 
     def _ask(self, images, on_wait=None):
         return self.client.read_batch(images, self.model, self.rules, self.notes,
