@@ -34,8 +34,27 @@ def _fit(img: Image.Image, max_dim: int) -> Image.Image:
     return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
 
 
+def page_count(path: str | Path) -> int:
+    """Liczba stron: dla PDF-a z dokumentu, dla obrazu zawsze 1."""
+    p = Path(path)
+    if kind_of(p) != "pdf":
+        return 1
+    if fitz is None:
+        raise RuntimeError("Brak biblioteki PyMuPDF - zainstaluj: pip install PyMuPDF")
+    doc = fitz.open(str(p))
+    try:
+        return doc.page_count
+    finally:
+        doc.close()
+
+
 def load_first_page(path: str | Path, dpi: int = RENDER_DPI) -> Image.Image:
     """Pierwsza strona PDF-a lub caly obraz, jako PIL.Image w RGB."""
+    return load_page(path, 0, dpi=dpi)
+
+
+def load_page(path: str | Path, index: int = 0, dpi: int = RENDER_DPI) -> Image.Image:
+    """Strona o numerze `index` (od 0) z PDF-a lub caly obraz, jako PIL.Image w RGB."""
     p = Path(path)
     k = kind_of(p)
     if k == "pdf":
@@ -45,7 +64,9 @@ def load_first_page(path: str | Path, dpi: int = RENDER_DPI) -> Image.Image:
         try:
             if doc.page_count == 0:
                 raise RuntimeError("PDF nie zawiera stron")
-            pix = doc[0].get_pixmap(dpi=dpi)
+            if not 0 <= index < doc.page_count:
+                raise RuntimeError(f"PDF nie ma strony {index + 1}")
+            pix = doc[index].get_pixmap(dpi=dpi)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             return img.convert("RGB")
         finally:

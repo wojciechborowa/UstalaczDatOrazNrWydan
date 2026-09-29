@@ -96,6 +96,25 @@ wymusza ponowny odczyt.
 fragment, który czytał model — więc 2000 rekordów da się zweryfikować wzrokiem. Podwójny
 klik w wiersz otwiera okno edycji.
 
+## Weryfikacja niepewnych odczytów
+
+Przycisk **Weryfikuj (N)** nad tabelą (albo Ctrl+W) otwiera okno z dużym podglądem strony
+i polami do poprawki — po kolei dla każdego rekordu, który wymaga sprawdzenia: błąd, brak
+danych, pewność poniżej 0,80, rekord podejrzany w walidacji krzyżowej albo bez nowej nazwy.
+Te same rekordy pokazuje filtr **„do sprawdzenia”**. Gdy w tabeli podświetlisz kilka
+wierszy, weryfikacja obejmie właśnie je.
+
+| Klawisz | Działanie |
+|---|---|
+| Enter | zapisz i przejdź do następnego |
+| Esc / ↓ | pomiń |
+| ↑ | poprzedni rekord |
+| PageUp / PageDown | poprzednia / następna strona PDF-a |
+| kółko myszy, przeciąganie | powiększenie, przesuwanie podglądu |
+
+Datę można wpisać jako `RRRR-MM-DD` albo `DD.MM.RRRR`. Przycisk *Otwórz w przeglądarce
+PDF* otwiera plik w programie systemowym.
+
 ## Bezpieczeństwo danych
 
 Klucz API leży w `~/.gazeta_ai/config.json` z prawami 600 i **nie trafia do pliku sesji** —
@@ -112,6 +131,7 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 | Ctrl+Shift+S | Zapisz sesję jako… |
 | Spacja | Przełącz zaznaczenie podświetlonych wierszy |
 | F5 | Odśwież tabelę |
+| Ctrl+W | Weryfikacja niepewnych odczytów |
 
 ## Eksport
 
@@ -125,6 +145,7 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | Plik | Rola |
 |---|---|
 | `app.py` | GUI: tabela, zakładki, paski postępu, sesje, dialogi |
+| `verify.py` | okno weryfikacji: duży podgląd strony + poprawka ręczna |
 | `worker.py` | wątek roboczy: batche, cache, pauza/stop, zdarzenia do GUI |
 | `openrouter_client.py` | HTTP, lista modeli, limit zapytań, ponawianie |
 | `prompt.py` | uniwersalny prompt i odporny parser JSON |

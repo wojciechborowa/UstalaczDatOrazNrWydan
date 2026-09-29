@@ -19,6 +19,7 @@ import rename_ops
 import render
 import session as session_io
 import validate
+from verify import VerifyDialog, needs_check
 from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS,
                     FREE_RPM, SESSION_EXT, load_config, save_config)
 from openrouter_client import FatalApiError, OpenRouterClient
@@ -117,6 +118,7 @@ class App(tk.Tk):
         t.add_separator()
         t.add_command(label="Przelicz nowe nazwy", command=self.recompute_all_names)
         t.add_command(label="Edytuj rekord...", command=self.edit_selected)
+        t.add_command(label="Weryfikuj niepewne...", accelerator="Ctrl+W", command=self.open_verify)
         t.add_separator()
         t.add_command(label="Cofnij zmiane nazw...", command=self.undo_rename)
         t.add_command(label="Wyczysc cache odczytow", command=self.clear_cache)
@@ -163,7 +165,7 @@ class App(tk.Tk):
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(top, text="Filtr:").pack(side="left")
         cb = ttk.Combobox(top, textvariable=self.var_filter, width=16, state="readonly",
-                          values=["wszystkie", "zaznaczone", "nowe", "odczytane",
+                          values=["wszystkie", "do sprawdzenia", "zaznaczone", "nowe", "odczytane",
                                   "brak danych", "bledy", "podejrzane", "bez nowej nazwy"])
         cb.pack(side="left", padx=3)
         cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_tree())
@@ -172,6 +174,10 @@ class App(tk.Tk):
         e.pack(side="left")
         e.bind("<Return>", lambda ev: self.refresh_tree())
         ttk.Button(top, text="Filtruj", command=self.refresh_tree).pack(side="left", padx=3)
+
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.btn_verify = ttk.Button(top, text="Weryfikuj (0)", command=self.open_verify)
+        self.btn_verify.pack(side="left")
 
         # ---- panel dzielony: tabela | podglad
         paned = ttk.PanedWindow(self.tab_main, orient="horizontal")
@@ -339,6 +345,8 @@ class App(tk.Tk):
         self.bind_all("<Control-Shift-S>", lambda e: self.save_session_as())
         self.bind_all("<Control-Shift-s>", lambda e: self.save_session_as())
         self.bind_all("<F5>", lambda e: self.refresh_tree())
+        self.bind("<Control-w>", lambda e: self.open_verify())
+        self.bind("<Control-W>", lambda e: self.open_verify())
 
     # ============================================================ pomoc/statusy
     def log(self, text: str):
@@ -436,6 +444,8 @@ class App(tk.Tk):
         out = []
         for r in self.records:
             st = (r.get("status") or "").lower()
+            if f == "do sprawdzenia" and not needs_check(r):
+                continue
             if f == "zaznaczone" and not r.get("checked"):
                 continue
             if f == "nowe" and st != "nowy":
@@ -502,6 +512,7 @@ class App(tk.Tk):
             self.by_iid[iid] = r
             self.tree.insert("", "end", iid=iid, values=self._row_values(r),
                              tags=self._row_tags(r))
+        self.update_verify_button()
         checked = sum(1 for r in self.records if r.get("checked"))
         self.set_status(f"{len(self.records)} plikow, zaznaczonych {checked}, "
                         f"widocznych {len(self.by_iid)}")
@@ -510,6 +521,11 @@ class App(tk.Tk):
         iid = r.get("_iid")
         if iid and self.tree.exists(iid):
             self.tree.item(iid, values=self._row_values(r), tags=self._row_tags(r))
+        self.update_verify_button()
+
+    def update_verify_button(self):
+        n = sum(1 for r in self.records if needs_check(r))
+        self.btn_verify.config(text=f"Weryfikuj ({n})")
 
     def on_tree_click(self, event):
         if self.tree.identify_region(event.x, event.y) != "cell":
@@ -833,6 +849,25 @@ class App(tk.Tk):
         r = self.by_iid.get(sel[0])
         if r:
             EditDialog(self, r, self._after_edit)
+
+    def open_verify(self):
+        """Duze okno z podgladem strony dla rekordow wymagajacych sprawdzenia.
+
+        Gdy w tabeli podswietlono kilka wierszy - weryfikuje wlasnie je.
+        """
+        sel = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
+        recs = sel if len(sel) > 1 else [r for r in self._visible_records() if needs_check(r)]
+        if not recs:
+            recs = [r for r in self.records if needs_check(r)]
+        if not recs:
+            messagebox.showinfo(APP_NAME, "Nie ma rekordow do sprawdzenia.")
+            return
+        VerifyDialog(self, recs, self._after_edit, self._after_verify)
+
+    def _after_verify(self, saved: int):
+        self.refresh_tree()
+        left = sum(1 for r in self.records if needs_check(r))
+        self.set_status(f"Weryfikacja: poprawiono {saved}, do sprawdzenia zostalo {left}.")
 
     def _after_edit(self, r: dict):
         r["status"] = "poprawione recznie"

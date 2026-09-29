@@ -63,6 +63,28 @@ def format_page(page: str | None) -> str:
     return digits.zfill(PAGE_PAD)
 
 
+def normalize_date(text: str | None) -> str | None:
+    """Data wpisana recznie -> RRRR-MM-DD.
+
+    Przyjmuje RRRR-MM-DD, DD.MM.RRRR, DD-MM-RRRR, DD/MM/RRRR i DDMMRRRR.
+    Zwraca None, gdy tekstu nie da sie zrozumiec.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.fullmatch(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})", t)
+    if m:
+        y, mo, d = m.groups()
+    else:
+        m = re.fullmatch(r"(\d{1,2})[-./](\d{1,2})[-./](\d{4})", t) or \
+            re.fullmatch(r"(\d{2})(\d{2})(\d{4})", t)
+        if not m:
+            return None
+        d, mo, y = m.groups()
+    iso = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    return iso if is_valid_date(iso) else None
+
+
 def is_valid_date(date_iso: str | None) -> bool:
     if not date_iso:
         return False

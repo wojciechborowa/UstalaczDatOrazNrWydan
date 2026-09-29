@@ -27,6 +27,8 @@ BATCH_SIZE = 5                 # ile skanow w jednym zapytaniu
 RENDER_DPI = 180               # rasteryzacja pierwszej strony PDF
 MAX_IMAGE_DIM = 1600           # dluzszy bok wysylanego obrazu (px)
 JPEG_QUALITY = 85
+VERIFY_CONFIDENCE = 0.8        # ponizej tej pewnosci rekord trafia do weryfikacji
+VERIFY_DPI = 150               # rozdzielczosc podgladu w oknie weryfikacji
 MAX_RETRIES = 5
 REQUEST_TIMEOUT = 180
 
