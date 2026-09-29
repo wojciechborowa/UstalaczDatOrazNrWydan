@@ -7,7 +7,7 @@ import time
 import cache_db
 import render
 from config import BATCH_SIZE
-from openrouter_client import FatalApiError, OpenRouterClient
+from ai_base import BaseClient, FatalApiError
 
 FIELDS = ("title", "language", "date_iso", "date_raw", "month_raw", "year_printed",
           "issue_number", "issue_suffix", "page_number", "is_cover", "confidence")
@@ -31,6 +31,7 @@ def _apply(rec: dict, item: dict, model: str, raw: str) -> None:
     rec["model"] = model
     rec["raw"] = raw
 
+    alts = [a for a in (item.get("date_alternatives") or []) if a]
     missing = []
     if not rec.get("date_iso"):
         missing.append("data")
@@ -40,20 +41,30 @@ def _apply(rec: dict, item: dict, model: str, raw: str) -> None:
         missing.append("nr strony")
     rec["status"] = "brak danych" if missing else "odczytano"
     rec["note"] = ("nie odczytano: " + ", ".join(missing)) if missing else ""
+    if len(alts) > 1:
+        # data niejednoznaczna (np. 3-2-1955) - do sprawdzenia recznego
+        rec["note"] = ("data niejednoznaczna: " + " | ".join(alts) +
+                       ("; " + rec["note"] if rec["note"] else ""))
+        if rec["confidence"] is not None:
+            rec["confidence"] = min(rec["confidence"], 0.5)
 
 
 class ReadWorker(threading.Thread):
     """Przetwarza liste rekordow. Komunikuje sie z GUI przez kolejke zdarzen."""
 
-    def __init__(self, records: list[dict], api_key: str, model: str, queue,
-                 batch_size: int = BATCH_SIZE, use_cache: bool = True, rpm: int = 20):
+    def __init__(self, records: list[dict], client: BaseClient, model: str, queue,
+                 batch_size: int = BATCH_SIZE, use_cache: bool = True,
+                 rules: str | None = None, notes: str | None = None):
         super().__init__(daemon=True)
         self.records = records
         self.model = model
         self.queue = queue
         self.batch_size = max(1, int(batch_size))
         self.use_cache = use_cache
-        self.client = OpenRouterClient(api_key, model, rpm=rpm)
+        self.client = client
+        self.rules = rules
+        self.notes = notes
+        self._seq = 0
 
         self._stop_evt = threading.Event()
         self._pause_evt = threading.Event()
@@ -92,6 +103,16 @@ class ReadWorker(threading.Thread):
             time.sleep(0.15)
         self.paused_total += time.time() - t0
         self.emit("resumed", {})
+
+    def _image(self, rec: dict) -> tuple[str, str]:
+        """(identyfikator, JPEG w base64) - identyfikator jest wypisany na obrazie."""
+        self._seq += 1
+        ident = f"{self._seq:05d}"
+        return ident, render.to_jpeg_b64(rec["path"], ident)
+
+    def _ask(self, images, on_wait=None):
+        return self.client.read_batch(images, self.model, self.rules, self.notes,
+                                      should_stop=self.should_stop, on_wait=on_wait)
 
     def emit(self, kind: str, data: dict) -> None:
         self.queue.put((kind, data))
@@ -136,12 +157,12 @@ class ReadWorker(threading.Thread):
                                       "files": [r["old_name"] for r in batch]})
 
             # render
-            urls, ok_batch = [], []
+            images, ok_batch = [], []
             for rec in batch:
                 if self._stop_evt.is_set():
                     break
                 try:
-                    urls.append(render.to_data_url(rec["path"]))
+                    images.append(self._image(rec))
                     ok_batch.append(rec)
                 except Exception as exc:
                     rec["status"] = "blad odczytu pliku"
@@ -152,10 +173,8 @@ class ReadWorker(threading.Thread):
                 continue
 
             try:
-                items, raw = self.client.read_batch(
-                    urls, self.model,
-                    should_stop=self.should_stop,
-                    on_wait=lambda d, a: self.emit("waiting", {"delay": d, "attempt": a}))
+                items, raw = self._ask(
+                    images, on_wait=lambda d, a: self.emit("waiting", {"delay": d, "attempt": a}))
             except FatalApiError as exc:
                 self.emit("fatal", {"error": str(exc)})
                 break
@@ -168,9 +187,7 @@ class ReadWorker(threading.Thread):
                     if self._stop_evt.is_set():
                         break
                     try:
-                        one, raw1 = self.client.read_batch(
-                            [render.to_data_url(rec["path"])], self.model,
-                            should_stop=self.should_stop)
+                        one, raw1 = self._ask([self._image(rec)])
                         _apply(rec, one[0], self.model, raw1)
                         if self.use_cache and rec.get("_hash"):
                             payload = {k: one[0].get(k) for k in one[0]}

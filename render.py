@@ -77,13 +77,60 @@ def load_page(path: str | Path, index: int = 0, dpi: int = RENDER_DPI) -> Image.
     raise RuntimeError(f"Nieobslugiwany format pliku: {p.suffix}")
 
 
-def to_data_url(path: str | Path, max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI) -> str:
-    """Gotowy data-URL do wyslania w polu image_url."""
+def _font(size: int):
+    """Czytelna czcionka do paska z identyfikatorem - systemowa albo wbudowana."""
+    from PIL import ImageFont
+    for name in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf", "DejaVuSansMono-Bold.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/Library/Fonts/Arial Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # Pillow < 10.1
+        return ImageFont.load_default()
+
+
+def stamp_id(img: Image.Image, ident: str) -> Image.Image:
+    """Dokleja nad obrazem bialy pasek z napisem "### 00042 ###".
+
+    Model przepisuje ten identyfikator do odpowiedzi, wiec wynik da sie przypisac
+    do wlasciwego pliku nawet wtedy, gdy model pomiesza kolejnosc obrazow w paczce.
+    """
+    from PIL import ImageDraw
+    w, h = img.size
+    bar = max(48, w // 14)
+    out = Image.new("RGB", (w, h + bar), "white")
+    out.paste(img, (0, bar))
+    draw = ImageDraw.Draw(out)
+    text = f"### {ident} ###"
+    font = _font(int(bar * 0.62))
+    try:
+        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+        tw, th = x1 - x0, y1 - y0
+    except Exception:
+        tw, th, x0, y0 = len(text) * bar // 3, bar // 2, 0, 0
+    draw.text(((w - tw) // 2 - x0, (bar - th) // 2 - y0), text, fill="black", font=font)
+    draw.line((0, bar - 1, w, bar - 1), fill="black", width=2)
+    return out
+
+
+def to_jpeg_b64(path: str | Path, ident: str | None = None,
+                max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI) -> str:
+    """Pierwsza strona jako JPEG w base64, opcjonalnie z paskiem identyfikatora."""
     img = _fit(load_first_page(path, dpi=dpi), max_dim)
+    if ident:
+        img = stamp_id(img, ident)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{b64}"
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def to_data_url(path: str | Path, max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI) -> str:
+    """Gotowy data-URL do wyslania w polu image_url."""
+    return "data:image/jpeg;base64," + to_jpeg_b64(path, None, max_dim, dpi)
 
 
 def thumbnail(path: str | Path, width: int = 300, top_fraction: float = 0.45) -> Image.Image:

@@ -96,6 +96,30 @@ wymusza ponowny odczyt.
 fragment, który czytał model — więc 2000 rekordów da się zweryfikować wzrokiem. Podwójny
 klik w wiersz otwiera okno edycji.
 
+## Dostawcy AI: OpenRouter i Google Gemini
+
+W zakładce **API i model** wybierasz dostawcę. Każdy ma własny klucz, model i limit
+zapytań na minutę — przełączanie niczego nie gubi.
+
+- **OpenRouter** — klucz z openrouter.ai/keys; darmowo 50 zapytań dziennie,
+  po jednorazowym zakupie 10 kredytów 1000 dziennie.
+- **Google Gemini** — klucz z aistudio.google.com/apikey; darmowe limity zależą od modelu
+  (Flash-Lite ma ich najwięcej), aktualne pokazuje AI Studio. Odpowiedź ma wymuszony
+  format JSON (`responseSchema`), więc rzadziej się psuje. Gdy nie da się pobrać listy
+  modeli, program pokazuje listę zapasową.
+
+**Identyfikator na obrazie.** Przed wysłaniem program dokleja nad każdym skanem biały
+pasek `### 00042 ###`. Model przepisuje ten numer do odpowiedzi i po nim wynik trafia do
+pliku — nawet jeśli model pomiesza kolejność obrazów w paczce. Odpowiedź z brakującym
+albo obcym identyfikatorem jest odrzucana, a paczka ponawiana plik po pliku.
+
+**Zasady odczytu.** Przycisk *Zasady odczytu i uwagi o kolekcji…* pozwala zmienić część
+promptu opisującą, jak czytać datę, i dopisać uwagi o konkretnej kolekcji (mogą być po
+polsku). Format odpowiedzi i identyfikatory dodaje program — tej części się nie edytuje.
+Domyślne zasady: data tylko z winiety, żywej paginy lub stopki (nigdy z artykułów,
+reklam ani kalendarzy), bez zgadywania, bez tłumaczenia odczytu, a gdy kolejność
+dzień/miesiąc jest niejasna — obie możliwe daty w uwagach i rekord do sprawdzenia.
+
 ## Weryfikacja niepewnych odczytów
 
 Przycisk **Weryfikuj (N)** nad tabelą (albo Ctrl+W) otwiera okno z dużym podglądem strony
@@ -171,6 +195,8 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | `report_import.py` | import raportów CSV z innego programu, skrót pliku `h2` |
 | `verify.py` | okno weryfikacji: duży podgląd strony + poprawka ręczna |
 | `worker.py` | wątek roboczy: batche, cache, pauza/stop, zdarzenia do GUI |
+| `ai_base.py` | wspólne dla dostawców AI: limit zapytań, ponawianie, błędy |
+| `gemini_client.py` | Google Gemini API: modele, zapytanie z `responseSchema` |
 | `openrouter_client.py` | HTTP, lista modeli, limit zapytań, ponawianie |
 | `prompt.py` | uniwersalny prompt i odporny parser JSON |
 | `render.py` | PDF/obraz → JPEG w base64 (rasteryzacja, nie OCR) |

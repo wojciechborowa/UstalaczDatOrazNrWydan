@@ -23,8 +23,16 @@ import session as session_io
 import validate
 from verify import VerifyDialog, needs_check, open_external
 from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS,
-                    FREE_RPM, SESSION_EXT, load_config, save_config)
+                    FREE_RPM, PROVIDERS, SESSION_EXT, load_config, save_config)
+from gemini_client import FALLBACK_MODELS, GeminiClient
 from openrouter_client import FatalApiError, OpenRouterClient
+from prompt import DEFAULT_RULES
+
+# klucze konfiguracji per dostawca: (klucz API, model, limit zapytan/min, domyslny limit)
+PROVIDER_CFG = {
+    "openrouter": ("api_key", "model", "rpm", FREE_RPM),
+    "gemini": ("gemini_key", "gemini_model", "gemini_rpm", 10),
+}
 from worker import ReadWorker
 
 CHECK_ON, CHECK_OFF = "\u2611", "\u2610"
@@ -72,10 +80,16 @@ class App(tk.Tk):
         self.report_index = report_import.Index()
         self._importing = False
 
-        self.var_key = tk.StringVar(value=self.cfg.get("api_key", ""))
-        self.var_model = tk.StringVar(value=self.cfg.get("model", ""))
+        prov = self.cfg.get("provider", "openrouter")
+        if prov not in PROVIDER_CFG:
+            prov = "openrouter"
+        k_key, k_model, k_rpm, d_rpm = PROVIDER_CFG[prov]
+        self.var_provider = tk.StringVar(value=prov)
+        self._provider_shown = prov
+        self.var_key = tk.StringVar(value=self.cfg.get(k_key, ""))
+        self.var_model = tk.StringVar(value=self.cfg.get(k_model, ""))
         self.var_batch = tk.IntVar(value=int(self.cfg.get("batch_size", BATCH_SIZE)))
-        self.var_rpm = tk.IntVar(value=int(self.cfg.get("rpm", FREE_RPM)))
+        self.var_rpm = tk.IntVar(value=int(self.cfg.get(k_rpm, d_rpm)))
         self.var_cache = tk.BooleanVar(value=bool(self.cfg.get("use_cache", True)))
         self.var_only_free = tk.BooleanVar(value=bool(self.cfg.get("only_free", True)))
         self.var_title_override = tk.StringVar(value="")
@@ -264,7 +278,18 @@ class App(tk.Tk):
     # --------------------------------------------------------------- zakladka 2
     def _build_api_tab(self):
         pad = {"padx": 8, "pady": 4}
-        box = ttk.LabelFrame(self.tab_api, text="Klucz API OpenRouter")
+        box0 = ttk.LabelFrame(self.tab_api, text="Dostawca AI")
+        box0.pack(fill="x", **pad)
+        row0 = ttk.Frame(box0)
+        row0.pack(fill="x", padx=8, pady=6)
+        for pid, label in PROVIDERS.items():
+            ttk.Radiobutton(row0, text=label, value=pid, variable=self.var_provider,
+                            command=self.switch_provider).pack(side="left", padx=(0, 16))
+        self.lbl_provider_hint = ttk.Label(box0, text="", foreground="#555", justify="left")
+        self.lbl_provider_hint.pack(anchor="w", padx=8, pady=(0, 6))
+
+        box = ttk.LabelFrame(self.tab_api, text="Klucz API")
+        self.box_key = box
         box.pack(fill="x", **pad)
 
         row = ttk.Frame(box)
@@ -275,10 +300,10 @@ class App(tk.Tk):
         ttk.Checkbutton(row, text="Pokaz", variable=self.var_showkey,
                         command=self._toggle_key).pack(side="left")
         ttk.Button(row, text="Zapisz klucz", command=self.save_key).pack(side="left", padx=6)
-        ttk.Button(row, text="Testuj klucz i limity", command=self.test_key).pack(side="left")
+        ttk.Button(row, text="Testuj klucz", command=self.test_key).pack(side="left")
 
-        ttk.Label(box, text="Klucz jest zapisywany lokalnie w ~/.gazeta_ai/config.json "
-                            "(prawa 600) i NIE trafia do pliku sesji.",
+        ttk.Label(box, text="Klucze sa zapisywane lokalnie w ~/.gazeta_ai/config.json "
+                            "(prawa 600) i NIE trafiaja do pliku sesji.",
                   foreground="#555").pack(anchor="w", padx=8, pady=(0, 6))
 
         self.lbl_key_info = ttk.Label(box, text="", foreground="#0a6b2e", justify="left")
@@ -290,8 +315,9 @@ class App(tk.Tk):
         row2 = ttk.Frame(box2)
         row2.pack(fill="x", padx=8, pady=6)
         ttk.Button(row2, text="Pobierz liste modeli", command=self.fetch_models).pack(side="left")
-        ttk.Checkbutton(row2, text="tylko darmowe (:free)", variable=self.var_only_free,
-                        command=self.fetch_models).pack(side="left", padx=10)
+        self.chk_only_free = ttk.Checkbutton(row2, text="tylko darmowe (:free)",
+                                             variable=self.var_only_free, command=self.fetch_models)
+        self.chk_only_free.pack(side="left", padx=10)
         ttk.Label(row2, text="(lista zawsze ograniczona do modeli przyjmujacych obrazy)",
                   foreground="#555").pack(side="left")
 
@@ -324,10 +350,21 @@ class App(tk.Tk):
         ttk.Spinbox(r, from_=1, to=120, width=5, textvariable=self.var_rpm).pack(side="left", padx=(4, 16))
         ttk.Checkbutton(r, text="uzywaj cache (nie pyta ponownie o ten sam plik)",
                         variable=self.var_cache).pack(side="left")
-        ttk.Label(box3, text="Wiekszy batch = mniej zapytan = szybciej w ramach limitu, "
-                             "ale rosnie ryzyko przesuniecia odpowiedzi. Zalecane 5.",
+        ttk.Label(box3, text="Wiekszy batch = mniej zapytan = szybciej w ramach limitu. Kazdy skan "
+                             "dostaje identyfikator na obrazie, wiec wyniki nie pomyla sie miedzy "
+                             "plikami. Zalecane 5.",
                   foreground="#555").pack(anchor="w", padx=8, pady=(0, 8))
         ttk.Button(box3, text="Zapisz ustawienia", command=self.save_key).pack(anchor="w", padx=8, pady=(0, 8))
+
+        box4 = ttk.LabelFrame(self.tab_api, text="Prompt")
+        box4.pack(fill="x", **pad)
+        r4 = ttk.Frame(box4)
+        r4.pack(fill="x", padx=8, pady=6)
+        ttk.Button(r4, text="Zasady odczytu i uwagi o kolekcji...",
+                   command=self.edit_prompt).pack(side="left")
+        self.lbl_prompt = ttk.Label(r4, text="", foreground="#555")
+        self.lbl_prompt.pack(side="left", padx=10)
+        self._update_provider_ui()
 
     def _build_log_tab(self):
         self.txt_log = ScrolledText(self.tab_log, wrap="word", font=("Consolas", 9))
@@ -690,12 +727,65 @@ class App(tk.Tk):
     def _toggle_key(self):
         self.ent_key.config(show="" if self.var_showkey.get() else "*")
 
+    def _client(self, key: str | None = None, model: str = ""):
+        """Klient wybranego dostawcy."""
+        key = self.var_key.get().strip() if key is None else key
+        rpm = max(1, int(self.var_rpm.get() or 1))
+        if self.var_provider.get() == "gemini":
+            return GeminiClient(key, model, rpm=rpm)
+        return OpenRouterClient(key, model, rpm=rpm)
+
+    def _store_provider_fields(self, prov: str):
+        k_key, k_model, k_rpm, _ = PROVIDER_CFG[prov]
+        self.cfg[k_key] = self.var_key.get().strip()
+        self.cfg[k_model] = self.var_model.get().strip()
+        try:
+            self.cfg[k_rpm] = int(self.var_rpm.get())
+        except (tk.TclError, ValueError):
+            pass
+
+    def switch_provider(self):
+        """Zmiana dostawcy: zapamietuje pola poprzedniego, wczytuje pola nowego."""
+        old, new = self._provider_shown, self.var_provider.get()
+        if old == new:
+            return
+        self._store_provider_fields(old)
+        k_key, k_model, k_rpm, d_rpm = PROVIDER_CFG[new]
+        self.var_key.set(self.cfg.get(k_key, ""))
+        self.var_model.set(self.cfg.get(k_model, ""))
+        self.var_rpm.set(int(self.cfg.get(k_rpm, d_rpm)))
+        self._provider_shown = new
+        self.cfg["provider"] = new
+        save_config(self.cfg)
+        self.tree_models.delete(*self.tree_models.get_children())
+        self.lbl_key_info.config(text="")
+        self._update_provider_ui()
+        self.log(f"Dostawca AI: {PROVIDERS[new]}")
+
+    def _update_provider_ui(self):
+        prov = self.var_provider.get()
+        self.box_key.config(text=f"Klucz API {PROVIDERS[prov]}")
+        if prov == "gemini":
+            self.lbl_provider_hint.config(text=(
+                "Klucz: aistudio.google.com/apikey. Darmowe limity zaleza od modelu "
+                "(Flash-Lite ma ich najwiecej); aktualne pokazuje AI Studio.\n"
+                "Odpowiedz ma wymuszony format JSON, wiec rzadziej sie psuje."))
+            self.chk_only_free.state(["disabled"])
+        else:
+            self.lbl_provider_hint.config(text=(
+                "Klucz: openrouter.ai/keys. Darmowo 50 zapytan/dzien, "
+                "po jednorazowym zakupie 10 kredytow 1000/dzien."))
+            self.chk_only_free.state(["!disabled"])
+        custom = bool((self.cfg.get("prompt_rules") or "").strip())
+        notes = bool((self.cfg.get("collection_notes") or "").strip())
+        self.lbl_prompt.config(text=("wlasne zasady" if custom else "zasady domyslne") +
+                               (" + uwagi o kolekcji" if notes else ""))
+
     def save_key(self):
+        self._store_provider_fields(self.var_provider.get())
         self.cfg.update({
-            "api_key": self.var_key.get().strip(),
-            "model": self.var_model.get().strip(),
+            "provider": self.var_provider.get(),
             "batch_size": int(self.var_batch.get()),
-            "rpm": int(self.var_rpm.get()),
             "use_cache": bool(self.var_cache.get()),
             "only_free": bool(self.var_only_free.get()),
         })
@@ -711,17 +801,21 @@ class App(tk.Tk):
         self.set_status("Sprawdzam klucz...")
         self.update_idletasks()
         try:
-            info = OpenRouterClient(key).key_info()
+            info = self._client(key).key_info()
         except Exception as exc:
             self.lbl_key_info.config(text=str(exc), foreground="#b00020")
             self.log(f"Test klucza: BLAD - {exc}")
             self.set_status("Klucz niepoprawny.")
             return
-        fm = info.get("free_model_daily_requests") or {}
-        txt = (f"Klucz dziala. Etykieta: {info.get('label') or '-'}\n"
-               f"Zuzycie (dzis): {info.get('usage_daily')}  ·  limit klucza: {info.get('limit')}\n"
-               f"Darmowe zapytania dzis: {fm.get('used', '?')}/{fm.get('limit', '?')} "
-               f"(pozostalo {fm.get('remaining', '?')})")
+        if self.var_provider.get() == "gemini":
+            txt = (f"Klucz dziala. Dostepnych modeli czytajacych obrazy: {info.get('models')}.\n"
+                   f"Gemini nie podaje limitow przez API - sprawdzisz je w AI Studio.")
+        else:
+            fm = info.get("free_model_daily_requests") or {}
+            txt = (f"Klucz dziala. Etykieta: {info.get('label') or '-'}\n"
+                   f"Zuzycie (dzis): {info.get('usage_daily')}  ·  limit klucza: {info.get('limit')}\n"
+                   f"Darmowe zapytania dzis: {fm.get('used', '?')}/{fm.get('limit', '?')} "
+                   f"(pozostalo {fm.get('remaining', '?')})")
         self.lbl_key_info.config(text=txt, foreground="#0a6b2e")
         self.log("Test klucza: OK. " + txt.replace("\n", " | "))
         self.set_status("Klucz poprawny.")
@@ -729,22 +823,34 @@ class App(tk.Tk):
     def fetch_models(self):
         self.set_status("Pobieram liste modeli...")
         self.update_idletasks()
+        gemini = self.var_provider.get() == "gemini"
+        rows, err = [], None
         try:
-            models = OpenRouterClient(self.var_key.get().strip()).vision_models(
-                only_free=self.var_only_free.get())
+            if gemini:
+                for m in self._client().vision_models():
+                    rows.append((m["id"], m.get("displayName", ""),
+                                 m.get("inputTokenLimit", ""), "wg AI Studio"))
+            else:
+                for m in OpenRouterClient(self.var_key.get().strip()).vision_models(
+                        only_free=self.var_only_free.get()):
+                    rows.append((m.get("id", ""), m.get("name", ""), m.get("context_length", ""),
+                                 "tak" if OpenRouterClient.is_free(m) else "nie"))
         except Exception as exc:
-            messagebox.showerror(APP_NAME, f"Nie udalo sie pobrac listy modeli:\n{exc}")
+            err = exc
+        if err is not None and gemini:
+            # bez listy tez da sie pracowac - pokazujemy modele zapasowe
+            rows = [(m, "(lista zapasowa)", "", "") for m in FALLBACK_MODELS]
+            self.log(f"Nie udalo sie pobrac listy modeli Gemini ({err}) - pokazuje liste zapasowa.")
+        elif err is not None:
+            messagebox.showerror(APP_NAME, f"Nie udalo sie pobrac listy modeli:\n{err}")
             self.set_status("Blad pobierania modeli.")
             return
         self.tree_models.delete(*self.tree_models.get_children())
-        for m in models:
-            self.tree_models.insert("", "end", values=(
-                m.get("id", ""), m.get("name", ""),
-                m.get("context_length", ""),
-                "tak" if OpenRouterClient.is_free(m) else "nie"))
-        self.log(f"Pobrano {len(models)} modeli obslugujacych obrazy"
-                 f"{' (tylko darmowe)' if self.var_only_free.get() else ''}.")
-        self.set_status(f"Znaleziono {len(models)} pasujacych modeli.")
+        for values in rows:
+            self.tree_models.insert("", "end", values=values)
+        self.log(f"Pobrano {len(rows)} modeli obslugujacych obrazy"
+                 f"{' (tylko darmowe)' if self.var_only_free.get() and not gemini else ''}.")
+        self.set_status(f"Znaleziono {len(rows)} pasujacych modeli.")
 
     def choose_model(self):
         sel = self.tree_models.selection()
@@ -755,6 +861,17 @@ class App(tk.Tk):
         self.var_model.set(model_id)
         self.save_key()
         self.log(f"Wybrano model: {model_id}")
+
+    def edit_prompt(self):
+        PromptDialog(self, self.cfg.get("prompt_rules") or "",
+                     self.cfg.get("collection_notes") or "", self._prompt_saved)
+
+    def _prompt_saved(self, rules: str, notes: str):
+        self.cfg["prompt_rules"] = rules
+        self.cfg["collection_notes"] = notes
+        save_config(self.cfg)
+        self._update_provider_ui()
+        self.log("Zapisano zasady odczytu i uwagi o kolekcji.")
 
     # =============================================================== odczyt AI
     def start_read(self):
@@ -776,25 +893,31 @@ class App(tk.Tk):
             return
 
         batch = max(1, int(self.var_batch.get()))
+        if self.var_provider.get() == "gemini":
+            limits = (f"Dostawca: Google Gemini, model {self.var_model.get()}\n"
+                      f"Darmowe limity zaleza od modelu - sprawdzisz je w AI Studio.")
+        else:
+            limits = ("Limit darmowy OpenRouter: 20/min oraz 50/dzien bez doladowania\n"
+                      "(1000/dzien po jednorazowym zakupie 10 kredytow).")
         est_req = -(-len(todo) // batch)
         if not messagebox.askyesno(
                 APP_NAME,
                 f"Plikow do odczytu: {len(todo)}\n"
                 f"Skanow w zapytaniu: {batch}\n"
                 f"Szacowana liczba zapytan: {est_req}\n\n"
-                f"Limit darmowy: 20/min oraz 50/dzien bez doladowania\n"
-                f"(1000/dzien po jednorazowym zakupie 10 kredytow).\n\n"
+                f"{limits}\n\n"
                 f"Rozpoczac?"):
             return
 
         self.save_key()
         self._set_running(True)
-        self.worker = ReadWorker(todo, self.var_key.get().strip(),
-                                 self.var_model.get().strip(), self.queue,
-                                 batch_size=batch, use_cache=self.var_cache.get(),
-                                 rpm=int(self.var_rpm.get()))
+        self.worker = ReadWorker(todo, self._client(), self.var_model.get().strip(),
+                                 self.queue, batch_size=batch, use_cache=self.var_cache.get(),
+                                 rules=self.cfg.get("prompt_rules"),
+                                 notes=self.cfg.get("collection_notes"))
         self.worker.start()
-        self.log(f"Start odczytu: {len(todo)} plikow, model {self.var_model.get()}.")
+        self.log(f"Start odczytu: {len(todo)} plikow, {PROVIDERS[self.var_provider.get()]}, "
+                 f"model {self.var_model.get()}.")
 
     def _set_running(self, running: bool):
         self._busy = running
@@ -1322,6 +1445,49 @@ class EditDialog(tk.Toplevel):
             val = var.get().strip()
             self.rec[key] = val or None
         self.on_ok(self.rec)
+        self.destroy()
+
+
+class PromptDialog(tk.Toplevel):
+    """Edycja zasad odczytu (czesc promptu) i uwag o konkretnej kolekcji."""
+
+    def __init__(self, parent: App, rules: str, notes: str, on_ok):
+        super().__init__(parent)
+        self.title("Zasady odczytu")
+        self.geometry("820x720")
+        self.on_ok = on_ok
+        self.transient(parent)
+        self.grab_set()
+
+        ttk.Label(self, text="Zasady odczytu (wysylane do modelu). Format odpowiedzi i "
+                             "identyfikatory obrazow dodaje program - ich tu nie ma.",
+                  wraplength=780, justify="left").pack(anchor="w", padx=10, pady=(10, 4))
+        self.txt_rules = ScrolledText(self, height=24, wrap="word", font=("Consolas", 9))
+        self.txt_rules.pack(fill="both", expand=True, padx=10)
+        self.txt_rules.insert("1.0", rules.strip() or DEFAULT_RULES)
+
+        ttk.Label(self, text="Uwagi o tej kolekcji (np. \"data jest w stopce strony 3\", "
+                             "\"numeracja od 1 co roku\"). Moga byc po polsku.",
+                  wraplength=780, justify="left").pack(anchor="w", padx=10, pady=(10, 4))
+        self.txt_notes = ScrolledText(self, height=5, wrap="word", font=("Consolas", 9))
+        self.txt_notes.pack(fill="x", padx=10)
+        self.txt_notes.insert("1.0", notes)
+
+        btns = ttk.Frame(self)
+        btns.pack(pady=10)
+        ttk.Button(btns, text="Zapisz", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Przywroc domyslne zasady", command=self.reset).pack(side="left", padx=4)
+        ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
+
+    def reset(self):
+        self.txt_rules.delete("1.0", "end")
+        self.txt_rules.insert("1.0", DEFAULT_RULES)
+
+    def ok(self):
+        rules = self.txt_rules.get("1.0", "end").strip()
+        if rules == DEFAULT_RULES.strip():
+            rules = ""  # domyslne nie sa zapisywane - nowa wersja programu da nowe domyslne
+        self.on_ok(rules, self.txt_notes.get("1.0", "end").strip())
         self.destroy()
 
 

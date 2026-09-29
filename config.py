@@ -15,6 +15,8 @@ RENAME_LOG_DIR = APP_DIR / "renames"
 SESSION_EXT = ".gsess"
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+PROVIDERS = {"openrouter": "OpenRouter", "gemini": "Google Gemini"}
 REFERER = "https://localhost/gazeta-ai"
 X_TITLE = "Gazeta AI Reader"
 
