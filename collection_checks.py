@@ -50,7 +50,8 @@ def check(records: list[dict]) -> dict:
         issue = nd.get("issue") or r.get("issue_number")
         if not issue or not nd:
             continue    # tylko pliki, ktorych numer znamy z nazwy
-        key = (_title(r), str(issue).lstrip("0"), (nd.get("suffix") or r.get("issue_suffix") or ""))
+        key = (_title(r), str(issue).lstrip("0"),
+               str(nd.get("suffix") or r.get("issue_suffix") or "").strip().lower())
         groups.setdefault(key, []).append(r)
 
     for recs in groups.values():

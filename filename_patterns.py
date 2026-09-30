@@ -10,7 +10,7 @@ Pola:
     {rok}    rok, 4 cyfry (albo "rrrr")
     {mm}     miesiac, cyfry (albo "mm" - nieznany)
     {dd}     dzien, cyfry (albo "dd" - nieznany)
-    {nr}     numer wydania, cyfry, opcjonalnie z dopiskiem (bis, s, special...)
+    {nr}     numer wydania, cyfry, opcjonalnie z dowolnym dopiskiem (A, B, bis, s, special...)
     {str}    numer strony, cyfry, opcjonalnie z "-OST" (ostatnia strona)
     {*}      cokolwiek - pomijane
 
@@ -31,7 +31,8 @@ FIELDS = {
     "rok": r"(?P<rok>\d{4}|rrrr|yyyy|aaaa)",
     "mm": r"(?P<mm>\d{1,2}|mm|xx)",
     "dd": r"(?P<dd>\d{1,2}|dd|xx)",
-    "nr": r"(?P<nr>\d{1,7}|n{3,7}|x{3,7})(?:[ -]?(?P<sfx>bis|ter|special|spec|extra|supl|sup|hs|s))?",
+    # numer + dowolny dopisek do nastepnego separatora: 023093A, 022025 bis, 010203s, 023100-2
+    "nr": r"(?P<nr>\d{1,7}|n{3,7}|x{3,7})(?P<sfx>[^\\/]*?)",
     "str": r"(?P<str>\d{1,4})(?:[ -]?(?P<ost>ost))?",
     "*": r".*?",
 }
@@ -49,6 +50,10 @@ class Pattern:
 
     def __post_init__(self):
         self.regex = compile_pattern(self.text)
+        # wzorzec kolekcji (lp + pelna data) - nazwa wyjsciowa = wejsciowa z uzupelniona data
+        compact = re.sub(r"\s+", "", self.text.lower())
+        if "{lp}" in compact and "{rok}-{mm}-{dd}" in compact:
+            self.keep_name = True
         if not self.label:
             self.label = self.text
 
@@ -122,9 +127,7 @@ def parse(filename: str, patterns: list[Pattern]) -> dict | None:
             name_date = iso if is_valid_date(iso) else None
         issue = g.get("nr")
         issue = str(int(issue)) if issue and issue.isdigit() else None
-        sfx = (g.get("sfx") or "").lower() or None
-        if sfx in ("s", "spec"):
-            sfx = "special"
+        sfx = (g.get("sfx") or "").strip(" -_") or None   # dopisek zostaje taki, jak w nazwie
         page = g.get("str")
         span = None
         if p.keep_name and g.get("rok") is not None and g.get("dd") is not None:

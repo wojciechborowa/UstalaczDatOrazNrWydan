@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import re
 import threading
 import time
@@ -23,12 +24,13 @@ import export
 import naming
 import refine
 import rename_ops
+import updater
 import report_import
 import render
 import session as session_io
 import validate
 from verify import VerifyDialog, needs_check, open_external, status_group
-from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_DB, COLUMN_MAX, COLUMNS,
+from config import (ALL_EXT, APP_DIR, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_DB, COLUMN_MAX, COLUMNS,
                     CONFIG_FILE,
                     FREE_RPM, PROVIDERS, SESSION_EXT, VERIFY_CONFIDENCE,
                     load_config, save_config)
@@ -174,6 +176,11 @@ class App(tk.Tk):
         m.add_cascade(label="Widok", menu=w)
 
         h = tk.Menu(m, tearoff=0)
+        h.add_command(label="Sprawdz aktualizacje...", command=self.check_updates)
+        h.add_command(label="Aktualizuj program z pliku ZIP...", command=self.update_from_zip)
+        h.add_command(label="Cofnij ostatnia aktualizacje...", command=self.rollback_update)
+        h.add_command(label="Zrodlo aktualizacji (repozytorium, galaz)...", command=self.update_source)
+        h.add_separator()
         h.add_command(label="O programie", command=self.about)
         m.add_cascade(label="Pomoc", menu=h)
 
@@ -1848,12 +1855,152 @@ class App(tk.Tk):
             APP_NAME,
             f"{APP_NAME} {APP_VERSION}\n\n"
             "Odczyt daty i numeru wydania ze skanow czasopism\n"
-            "za pomoca modeli multimodalnych przez OpenRouter.\n"
-            "Bez OCR - obraz trafia prosto do modelu.\n\n"
+            "za pomoca modeli multimodalnych (OpenRouter, Google Gemini).\n\n"
             "Format nazwy:\n"
             "  Tytul - RRRR-MM-DD - 000638.pdf\n"
             "  Tytul - RRRR-MM-DD - 000638 - 015.jpg\n"
-            "  (wydanie specjalne: 000315-bis)")
+            "  kolekcje: nazwa wejsciowa z uzupelniona data\n\n"
+            f"Folder programu: {updater.APP_ROOT}\n"
+            f"Aktualizacje: {self._update_repo()} / {self._update_branch()}")
+
+    # =============================================================== aktualizacje
+    def _update_repo(self) -> str:
+        return self.cfg.get("update_repo") or updater.DEFAULT_REPO
+
+    def _update_branch(self) -> str:
+        return self.cfg.get("update_branch") or updater.DEFAULT_BRANCH
+
+    def update_source(self):
+        from tkinter import simpledialog
+        repo = simpledialog.askstring(APP_NAME, "Repozytorium na GitHubie (wlasciciel/nazwa):",
+                                      initialvalue=self._update_repo(), parent=self)
+        if not repo:
+            return
+        branch = simpledialog.askstring(APP_NAME, "Galaz:", initialvalue=self._update_branch(),
+                                        parent=self)
+        if not branch:
+            return
+        self.cfg["update_repo"], self.cfg["update_branch"] = repo.strip(), branch.strip()
+        save_config(self.cfg)
+        self.log(f"Zrodlo aktualizacji: {repo} / {branch}")
+
+    def _busy_check(self) -> bool:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo(APP_NAME, "Trwa odczyt - poczekaj, az sie skonczy.")
+            return True
+        return False
+
+    def check_updates(self):
+        if self._busy_check():
+            return
+        repo, branch = self._update_repo(), self._update_branch()
+        self.set_status("Sprawdzam aktualizacje...")
+        self.update_idletasks()
+        try:
+            data = updater.download(repo, branch)
+            info = updater.inspect(data)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Nie udalo sie sprawdzic aktualizacji:\n{exc}")
+            self.set_status("Blad sprawdzania aktualizacji.")
+            return
+        if not info["changed"] and not info["added"]:
+            messagebox.showinfo(APP_NAME, f"Masz najnowsza wersje ({APP_VERSION}).")
+            self.set_status("Program jest aktualny.")
+            return
+        changes = updater.remote_changes(repo, branch)
+        info["notes"] = "\n".join("  - " + c for c in changes[:8])
+        self._offer_update(info, f"GitHub: {repo} / {branch}")
+
+    def update_from_zip(self):
+        if self._busy_check():
+            return
+        path = filedialog.askopenfilename(title="Paczka aktualizacji",
+                                          filetypes=[("Paczka ZIP", "*.zip"), ("Wszystkie pliki", "*.*")])
+        if not path:
+            return
+        try:
+            info = updater.inspect(Path(path).read_bytes())
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Nie mozna uzyc tej paczki:\n{exc}")
+            return
+        if not info["changed"] and not info["added"]:
+            messagebox.showinfo(APP_NAME, "Ta paczka niczego nie zmienia - masz juz te pliki.")
+            return
+        self._offer_update(info, Path(path).name)
+
+    def _offer_update(self, info: dict, source: str):
+        files = info["changed"] + [f + " (nowy)" for f in info["added"]]
+        listing = "\n".join("  " + f for f in files[:15]) + (
+            f"\n  ... i {len(files) - 15} innych" if len(files) > 15 else "")
+        newer = info.get("version") or "?"
+        warn = ""
+        if newer != "?" and updater.version_tuple(newer) < updater.version_tuple(APP_VERSION):
+            warn = "\n\nUWAGA: to STARSZA wersja niz obecna."
+        msg = (f"Zrodlo: {source}\nWersja: {APP_VERSION} -> {newer}{warn}\n\n"
+               f"Pliki do podmiany ({len(files)}):\n{listing}")
+        if info.get("notes"):
+            msg += f"\n\nZmiany:\n{info['notes']}"
+        msg += ("\n\nPrzed podmiana program zrobi kopie zapasowa i zapisze sesje, "
+                "potem uruchomi sie ponownie. Aktualizowac?")
+        if not messagebox.askyesno(APP_NAME, msg):
+            return
+        reopen = self._save_before_restart()
+        if reopen is False:
+            return
+        try:
+            backup = updater.apply(info)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Aktualizacja nie powiodla sie:\n{exc}")
+            return
+        self.log(f"Zaktualizowano do {newer}. Kopia zapasowa: {backup}")
+        messagebox.showinfo(APP_NAME, f"Zaktualizowano ({len(files)} plikow).\n"
+                                      "Program uruchomi sie ponownie.")
+        self._restart(reopen)
+
+    def rollback_update(self):
+        if self._busy_check():
+            return
+        lst = updater.backups()
+        if not lst:
+            messagebox.showinfo(APP_NAME, "Nie ma kopii zapasowej do przywrocenia.")
+            return
+        if not messagebox.askyesno(APP_NAME, f"Przywrocic pliki programu sprzed ostatniej "
+                                             f"aktualizacji ({lst[0].name})?\n"
+                                             "Program uruchomi sie ponownie."):
+            return
+        reopen = self._save_before_restart()
+        if reopen is False:
+            return
+        try:
+            meta = updater.rollback()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Nie udalo sie cofnac aktualizacji:\n{exc}")
+            return
+        self.log(f"Cofnieto aktualizacje do wersji {meta.get('from_version')}.")
+        self._restart(reopen)
+
+    def _save_before_restart(self):
+        """Zapisuje sesje przed restartem. Zwraca sciezke do ponownego otwarcia,
+        None (brak sesji) albo False (uzytkownik zrezygnowal)."""
+        if not self.records:
+            return None
+        if self.session_path:
+            return self.session_path if self.save_session() else False
+        path = str(APP_DIR / "sesja_przed_aktualizacja.gsess")
+        return path if self._write_session(path) else False
+
+    def _restart(self, session: str | None):
+        import subprocess
+        args = [sys.executable, str(updater.APP_ROOT / "app.py")]
+        if session:
+            args += ["--open", session]
+        try:
+            self._save_column_widths()
+        except Exception:
+            pass
+        subprocess.Popen(args, cwd=str(updater.APP_ROOT))
+        self.dirty = False
+        self.destroy()
 
     def on_close(self):
         try:
@@ -2276,4 +2423,10 @@ class UndoDialog(tk.Toplevel):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    app = App()
+    if "--open" in sys.argv:
+        # ponowne uruchomienie po aktualizacji - wracamy do tej samej sesji
+        i = sys.argv.index("--open")
+        if i + 1 < len(sys.argv) and Path(sys.argv[i + 1]).exists():
+            app.after(200, lambda: app._load_session(sys.argv[i + 1]))
+    app.mainloop()

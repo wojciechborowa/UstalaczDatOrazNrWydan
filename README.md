@@ -53,13 +53,17 @@ lista wzorców tej sesji, z podglądem na bieżących plikach.
 | `{tytul}` | tytuł gazety |
 | `{rok}` | rok, 4 cyfry (albo `rrrr`) |
 | `{mm}`, `{dd}` | miesiąc, dzień (albo `mm`, `dd` = nieznane) |
-| `{nr}` | numer wydania, z dopiskiem `bis`, `s`, `special`… |
+| `{nr}` | numer wydania, z dowolnym dopiskiem do następnego separatora: `023093A`, `022025 bis`, `010203s`, `023100-2`… |
 | `{str}` | numer strony, z `-OST` (ostatnia strona wydania) |
 | `{*}` | cokolwiek — pomijane |
 
 Przykład: pliki `1956-962.pdf`, `2015-2224.pdf` (rok i numer Przeglądu Sportowego) —
 wzorzec `{rok}-{nr}`, tytuł `Przeglad Sportowy`.
 
+- Własny wzorzec zawierający `{lp}` i `{rok}-{mm}-{dd}` działa jak kolekcja — nazwa
+  wyjściowa to wejściowa z uzupełnioną datą.
+- Dopisek przy numerze zostaje w nazwie bez zmian i jest częścią numeru: `023167A`
+  i `023167B` to dwa różne wydania.
 - Wzorce wbudowane działają zawsze i są sprawdzane pierwsze: kolekcje stron i wydań
   (z `lp`) oraz nasz format wyjściowy — pliki już raz przemianowane też są rozpoznawane.
 - Plik dostaje pierwszy pasujący wzorzec; kolumna **Wzorzec** pokazuje który.
@@ -305,6 +309,22 @@ Co się dzieje z dopasowanym rekordem:
 
 Skróty liczone są w tle i zapamiętywane w sesji, więc kolejny import ich nie przelicza.
 
+## Aktualizacje programu
+
+*Pomoc →*
+- **Sprawdź aktualizacje…** — pobiera najnowszą wersję z repozytorium na GitHubie
+  (domyślnie `wojciechborowa/UstalaczDatOrazNrWydan`, gałąź `claude/program-fix-izr5og`;
+  zmiana: *Źródło aktualizacji…*), pokazuje listę zmienianych plików i ostatnie zmiany.
+- **Aktualizuj program z pliku ZIP…** — to samo z paczki ZIP (np. z kilkoma poprawionymi
+  plikami). Paczka może mieć pliki w podfolderze i opcjonalny `update.json`
+  (`{"version": "2.0.1", "notes": "..."}`).
+- **Cofnij ostatnią aktualizację…** — przywraca pliki sprzed aktualizacji.
+
+Przed podmianą program robi kopię zastępowanych plików (folder `backups` w folderze
+danych), zapisuje sesję, podmienia tylko pliki programu (`.py`, `.md`, `.txt`, `.json`,
+`.bat`) w swoim folderze i uruchamia się ponownie, wracając do tej samej sesji. Paczki
+z niebezpiecznymi ścieżkami (`..`, ścieżki bezwzględne) są odrzucane.
+
 ## Bezpieczeństwo danych
 
 Dane programu (klucze API, cache odpowiedzi, logi zmian nazw w `renames/`) leżą w:
@@ -358,6 +378,7 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | `filename_patterns.py` | wzorce nazw plików wejściowych |
 | `collection_checks.py` | kolekcje: jedno wydanie = jedna data, chronologia `lp` |
 | `rename_ops.py` | zmiana nazw z logiem i cofaniem |
+| `updater.py` | aktualizacje z ZIP-a i z GitHuba, kopie zapasowe, cofanie |
 | `cache_db.py` | cache SQLite po odcisku pliku (tylko wynik danego pliku, nie cała paczka) |
 | `session.py`, `export.py`, `config.py` | sesje, CSV/XLSX, ustawienia |
 
