@@ -3,6 +3,9 @@
 Format:
     "France Football - 1958-06-17 - 000638.pdf"
     "France Football - 1958-06-17 - 000638 - 015.jpg"   (pojedyncza strona)
+    "Placar - 1976-mm-dd - 000123.jpg"                  (nieznany dzien i miesiac)
+    "0001 - O Fluminense (RJ) - 1954-07-20 - 022025 - 006-OST.jpg"
+                                                        (kolekcja - zmienia sie tylko data)
 
 Numer wydania: liczba dopelniona zerami do 6 cyfr, dopisek po mysliniku ("000315-bis").
 Numer strony:  dopelniony zerami do 3 cyfr.
@@ -94,36 +97,52 @@ def is_valid_date(date_iso: str | None) -> bool:
     return 1800 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31
 
 
+UNKNOWN_TITLE = "Nieznany tytul"
+
+
 def build_new_name(rec: dict, title_override: str = "") -> tuple[str, str]:
-    """Zwraca (nazwa, powod_bledu). Pusta nazwa == nie da sie zbudowac."""
-    ext = Path(rec.get("path", "")).suffix.lower() or ".pdf"
-    kind = rec.get("kind", "pdf")
+    """Zwraca (nazwa, braki). Nazwa jest zawsze w formacie docelowym - czego nie wiadomo,
+    to zostaje znacznikiem (rrrr, mm, dd, nnnnnn). Pusty tekst brakow == nazwa kompletna.
 
-    title = clean_title(title_override or rec.get("title"))
+    Pliki z kolekcji (wzorzec z lp) zachowuja nazwe wejsciowa - podmieniana jest tylko data.
+    """
+    src = Path(rec.get("path", "") or rec.get("old_name", ""))
+    nd = rec.get("name_data") or {}
     date_iso = (rec.get("date_iso") or "").strip()
-    issue = format_issue(rec.get("issue_number"), rec.get("issue_suffix"))
+    date_ok = is_valid_date(date_iso)
 
+    if nd.get("keep_name") and nd.get("date_span"):
+        stem, ext = src.stem, src.suffix
+        s, e = nd["date_span"]
+        if date_ok:
+            return f"{stem[:s]}{date_iso}{stem[e:]}{ext}", ""
+        year = nd.get("year")
+        return f"{stem[:s]}{year or 'rrrr'}-mm-dd{stem[e:]}{ext}", "brak: data"
+
+    ext = src.suffix.lower() or ".pdf"
     missing = []
+    title = clean_title(title_override or rec.get("title") or nd.get("title"))
     if not title:
+        title = UNKNOWN_TITLE
         missing.append("tytul")
-    if not is_valid_date(date_iso):
-        missing.append("data")
-    if not issue:
-        missing.append("nr wydania")
-
-    if kind == "image":
-        page = format_page(rec.get("page_number"))
-        if not page:
-            missing.append("nr strony")
+    if date_ok:
+        date = date_iso
     else:
-        page = ""
-
-    if missing:
-        return "", "brak: " + ", ".join(missing)
-
-    if page:
-        return f"{title} - {date_iso} - {issue} - {page}{ext}", ""
-    return f"{title} - {date_iso} - {issue}{ext}", ""
+        year = nd.get("year")
+        if not year and date_iso[:4].isdigit():
+            year = int(date_iso[:4])
+        date = f"{year or 'rrrr'}-mm-dd"
+        missing.append("data")
+    issue = format_issue(rec.get("issue_number"), rec.get("issue_suffix"))
+    if not issue:
+        issue = "n" * ISSUE_PAD
+        missing.append("nr wydania")
+    page = format_page(rec.get("page_number"))
+    if page and nd.get("ost"):
+        page += "-OST"
+    lp = f"{nd['lp']} - " if nd.get("lp") else ""
+    name = f"{lp}{title} - {date} - {issue}" + (f" - {page}" if page else "") + ext
+    return name, ("brak: " + ", ".join(missing)) if missing else ""
 
 
 def resolve_collision(target: Path, taken: set[str]) -> Path:

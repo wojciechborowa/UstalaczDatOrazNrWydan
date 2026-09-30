@@ -12,6 +12,8 @@ SESSION_KEYS = [
     "issue_number", "issue_suffix", "page_number", "is_cover", "confidence",
     "new_name", "status", "note", "raw", "model", "outlier", "outlier_info",
     "h2", "size", "report_flag", "cal_state", "cal_info", "vote_conflict", "first", "cal_filled",
+    "name_data", "pattern", "name_date", "name_complete", "year_mismatch", "name_unconfirmed",
+    "group_ok", "group_conflict", "group_filled", "chrono_flag", "chrono_info",
 ]
 
 

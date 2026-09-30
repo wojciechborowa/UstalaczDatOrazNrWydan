@@ -67,8 +67,43 @@ def rules_text(custom_rules: str | None = None, notes: str | None = None) -> str
     return text
 
 
+def _hints_text(ids: list[str], hints: dict | None) -> str:
+    """Sekcja z danymi znanymi z nazw plikow (rok, numer, strona, tytul)."""
+    if not hints:
+        return ""
+    lines = []
+    for i in ids:
+        h = hints.get(i) or {}
+        parts = []
+        if h.get("title"):
+            parts.append(f'publication "{h["title"]}"')
+        if h.get("year"):
+            parts.append(f"year {h['year']}")
+        if h.get("issue"):
+            parts.append(f"issue {h['issue']}" + (f" {h['suffix']}" if h.get("suffix") else ""))
+        if h.get("page"):
+            parts.append(f"page {h['page']}" + (" (last page of the issue)" if h.get("ost") else ""))
+        if parts:
+            lines.append(f"  {i}: " + ", ".join(parts))
+    if not lines:
+        return ""
+    return """
+KNOWN FROM THE FILE NAMES (reliable - do not contradict them without clear evidence on the page)
+""" + "\n".join(lines) + """
+
+For these images your main task is the DAY and MONTH of the issue date printed on the page
+(in the masthead on a front page, in the running head on inner pages, sometimes in the footer).
+Because the year is known, return "date_iso" with that year whenever day and month are visible,
+even if the year itself is not printed on this page - this overrides the rule about unprinted years.
+If the page clearly shows a DIFFERENT year, return the year that is printed.
+If the page shows two different dates that could each be the issue date (e.g. a scanning mix-up),
+set "date_iso" to null and put both dates in "date_alternatives".
+Fields known from the file name may be returned as null.
+"""
+
+
 def build_user_prompt(ids: list[str], custom_rules: str | None = None,
-                      notes: str | None = None) -> str:
+                      notes: str | None = None, hints: dict | None = None) -> str:
     n = len(ids)
     return f"""You are given {n} scanned image(s). Each image is a page from a DIFFERENT issue,
 possibly a different publication, a different language and a different decade.
@@ -97,7 +132,7 @@ For EACH image return one JSON object with exactly these keys:
 RULES
 
 {rules_text(custom_rules, notes)}
-
+{_hints_text(ids, hints)}
 Return ONLY a JSON array with exactly {n} objects, one per identifier listed above.
 No markdown, no code fences, no commentary before or after."""
 

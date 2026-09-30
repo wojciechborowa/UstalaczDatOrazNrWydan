@@ -16,6 +16,8 @@ from tkinter.scrolledtext import ScrolledText
 
 import cache_db
 import calendar_model
+import collection_checks
+import filename_patterns
 from collection_map import CollectionMap
 import export
 import naming
@@ -26,7 +28,8 @@ import render
 import session as session_io
 import validate
 from verify import VerifyDialog, needs_check, open_external, status_group
-from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, COLUMNS, CONFIG_FILE,
+from config import (ALL_EXT, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_DB, COLUMN_MAX, COLUMNS,
+                    CONFIG_FILE,
                     FREE_RPM, PROVIDERS, SESSION_EXT, VERIFY_CONFIDENCE,
                     load_config, save_config)
 from gemini_client import FALLBACK_MODELS, GeminiClient
@@ -60,6 +63,7 @@ def make_record(path: Path) -> dict:
         "confidence": None, "new_name": "", "status": "nowy", "note": "",
         "raw": "", "model": None, "outlier": False, "outlier_info": "",
         "h2": None, "size": None, "report_flag": False,
+        "name_data": None, "pattern": "", "name_date": None, "name_complete": False,
     }
 
 
@@ -83,6 +87,7 @@ class App(tk.Tk):
         self._thumb_img = None
         self._busy = False
         self.report_index = report_import.Index()
+        self.session_patterns: list[dict] = []   # wlasne wzorce nazw tej sesji
         self._importing = False
 
         prov = self.cfg.get("provider", "openrouter")
@@ -138,6 +143,8 @@ class App(tk.Tk):
         p.add_command(label="Dodaj folder z podfolderami...", command=lambda: self.add_folder(True))
         p.add_command(label="Dodaj pojedyncze pliki...", command=self.add_files)
         p.add_separator()
+        p.add_command(label="Wzorce nazw plikow...", command=self.edit_patterns)
+        p.add_separator()
         p.add_command(label="Usun zaznaczone z listy", command=self.remove_checked)
         p.add_command(label="Wyczysc liste", command=self.clear_list)
         m.add_cascade(label="Pliki", menu=p)
@@ -156,9 +163,15 @@ class App(tk.Tk):
         t.add_command(label="Weryfikuj niepewne...", accelerator="Ctrl+W", command=self.open_verify)
         t.add_separator()
         t.add_command(label="Cofnij zmiane nazw...", command=self.undo_rename)
-        t.add_command(label="Wyczysc cache odczytow", command=self.clear_cache)
+        t.add_command(label="Cache odczytow: rozmiar i czyszczenie...", command=self.clear_cache)
         t.add_command(label="Statystyki", command=self.show_stats)
         m.add_cascade(label="Narzedzia", menu=t)
+
+        w = tk.Menu(m, tearoff=0)
+        w.add_command(label="Dopasuj kolumny do zawartosci", accelerator="Ctrl+D",
+                      command=self.autofit_columns)
+        w.add_command(label="Pokaz/ukryj kolumny: prawy przycisk na naglowku tabeli", state="disabled")
+        m.add_cascade(label="Widok", menu=w)
 
         h = tk.Menu(m, tearoff=0)
         h.add_command(label="O programie", command=self.about)
@@ -202,7 +215,8 @@ class App(tk.Tk):
         ttk.Label(top, text="Filtr:").pack(side="left")
         cb = ttk.Combobox(top, textvariable=self.var_filter, width=16, state="readonly",
                           values=["wszystkie", "do sprawdzenia", "pewne", "zaznaczone", "nowe", "odczytane",
-                                  "brak danych", "bledy", "podejrzane", "bez nowej nazwy"])
+                                  "brak danych", "bledy", "podejrzane", "bez nowej nazwy",
+                                  "luzne (bez wzorca)"])
         cb.pack(side="left", padx=3)
         cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_tree())
         ttk.Label(top, text="Szukaj:").pack(side="left", padx=(8, 2))
@@ -231,8 +245,11 @@ class App(tk.Tk):
             else:
                 self.tree.heading(key, text=header, command=lambda k=key: self.sort_by(k))
             anchor = "center" if key in ("check", "date_iso", "issue", "page", "confidence") else "w"
-            self.tree.column(key, width=width, anchor=anchor,
-                             stretch=(key in ("old_name", "new_name", "note")))
+            width = int((self.cfg.get("col_widths") or {}).get(key, width))
+            self.tree.column(key, width=width, anchor=anchor, stretch=False)
+        hidden = set(self.cfg.get("hidden_cols") or [])
+        self.tree.configure(displaycolumns=[c for c in cols if c not in hidden])
+        self.header_menu = tk.Menu(self, tearoff=0)
         vsb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(left, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
@@ -276,7 +293,8 @@ class App(tk.Tk):
         act = ttk.Frame(self.tab_main)
         act.pack(fill="x", padx=4, pady=(2, 4))
         ttk.Label(act, text="Tytul (nadpisz):").pack(side="left")
-        ttk.Entry(act, textvariable=self.var_title_override, width=22).pack(side="left", padx=(3, 10))
+        ttk.Entry(act, textvariable=self.var_title_override, width=22).pack(side="left", padx=(3, 3))
+        ttk.Button(act, text="Wzorce nazw...", command=self.edit_patterns).pack(side="left", padx=(0, 10))
 
         self.btn_read = ttk.Button(act, text="Odczytaj daty za pomoca AI", command=self.start_read)
         self.btn_read.pack(side="left")
@@ -419,6 +437,7 @@ class App(tk.Tk):
         self.bind_all("<Control-Shift-s>", lambda e: self.save_session_as())
         self.bind_all("<F5>", lambda e: self.refresh_tree())
         self.bind_all("<Control-Shift-O>", lambda e: self.open_last_session())
+        self.bind("<Control-d>", lambda e: self.autofit_columns())
         self.bind("<Control-w>", lambda e: self.open_verify())
         self.bind("<Control-W>", lambda e: self.open_verify())
 
@@ -481,16 +500,24 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "Nie znaleziono nowych plikow do dodania.")
             return
         total = len(new)
+        patterns = self.patterns()
+        added = []
         for i, p in enumerate(new, start=1):
-            self.records.append(make_record(p))
+            r = make_record(p)
+            self.apply_name_data(r, patterns)
+            self.records.append(r)
+            added.append(r)
             if i % 50 == 0 or i == total:
                 self.set_progress(i, total, "Import")
                 self.update_idletasks()
-        self.log(f"Dodano {total} plikow (lacznie {len(self.records)}).")
+        self.log(f"Dodano {total} plikow (lacznie {len(self.records)}). "
+                 f"Wzorce nazw: {self.pattern_summary(added)}")
         self.clear_progress()
         self.refresh_tree()
         self.mark_dirty()
-        self.set_status(f"{len(self.records)} plikow na liscie.")
+        self.autofit_columns()
+        self.set_status(f"{len(self.records)} plikow na liscie. Wzorce nazw: "
+                        f"{self.pattern_summary(added)}")
         if self.report_index.sources:
             # wczytane wczesniej raporty od razu obejmuja tez nowe pliki
             self._run_report_job([], quiet=True)
@@ -537,7 +564,9 @@ class App(tk.Tk):
                 continue
             if f == "podejrzane" and not r.get("outlier"):
                 continue
-            if f == "bez nowej nazwy" and r.get("new_name"):
+            if f == "bez nowej nazwy" and r.get("name_complete"):
+                continue
+            if f == "luzne (bez wzorca)" and r.get("name_data"):
                 continue
             if q:
                 hay = " ".join(str(r.get(k) or "") for k in
@@ -564,6 +593,7 @@ class App(tk.Tk):
             r.get("new_name") or "",
             "" if conf is None else f"{conf:.2f}",
             r.get("status") or "",
+            r.get("pattern") or "",
             note,
         )
 
@@ -669,11 +699,70 @@ class App(tk.Tk):
         return "break"
 
     def on_tree_menu(self, event):
+        if self.tree.identify_region(event.x, event.y) == "heading":
+            self._show_header_menu(event)
+            return
         iid = self.tree.identify_row(event.y)
         if iid and iid not in self.tree.selection():
             self.tree.selection_set(iid)
         if self.tree.selection():
             self.tree_menu.tk_popup(event.x_root, event.y_root)
+
+    # --------------------------------------------------------------- kolumny
+    def _show_header_menu(self, event):
+        m = self.header_menu
+        m.delete(0, "end")
+        m.add_command(label="Dopasuj kolumny do zawartosci", command=self.autofit_columns)
+        m.add_separator()
+        shown = set(self.tree["displaycolumns"])
+        if shown == {"#all"}:
+            shown = {c[0] for c in COLUMNS}
+        self._col_vars = {}
+        for key, header, _w in COLUMNS:
+            if key == "check":
+                continue
+            v = tk.BooleanVar(value=key in shown)
+            self._col_vars[key] = v
+            m.add_checkbutton(label=header, variable=v, command=lambda k=key: self._toggle_column(k))
+        m.tk_popup(event.x_root, event.y_root)
+
+    def _toggle_column(self, key: str):
+        hidden = set(self.cfg.get("hidden_cols") or [])
+        if self._col_vars[key].get():
+            hidden.discard(key)
+        else:
+            hidden.add(key)
+        self.cfg["hidden_cols"] = sorted(hidden)
+        self.tree.configure(displaycolumns=[c[0] for c in COLUMNS if c[0] not in hidden])
+        save_config(self.cfg)
+
+    def autofit_columns(self):
+        """Szerokosc kazdej kolumny wg najdluzszego tekstu (w granicach COLUMN_MAX)."""
+        from tkinter import font as tkfont
+        style = ttk.Style()
+        try:
+            fnt = tkfont.nametofont(style.lookup("Treeview", "font") or "TkDefaultFont")
+        except tk.TclError:
+            fnt = tkfont.nametofont("TkDefaultFont")
+        try:
+            hfnt = tkfont.nametofont(style.lookup("Treeview.Heading", "font") or "TkHeadingFont")
+        except tk.TclError:
+            hfnt = fnt
+        rows = list(self.by_iid.values())[:1500]   # probka wystarczy, a duze listy nie spowalniaja
+        for i, (key, header, _w) in enumerate(COLUMNS):
+            if key == "check":
+                continue
+            width = hfnt.measure(header) + 24
+            texts = {self._row_values(r)[i] for r in rows}
+            for t in texts:
+                width = max(width, fnt.measure(str(t)) + 18)
+            width = min(width, COLUMN_MAX.get(key, 180))
+            self.tree.column(key, width=width)
+        self._save_column_widths()
+
+    def _save_column_widths(self):
+        self.cfg["col_widths"] = {c[0]: int(self.tree.column(c[0], "width")) for c in COLUMNS}
+        save_config(self.cfg)
 
     def set_all_checked(self, flag: bool):
         for r in self.records:
@@ -1032,6 +1121,7 @@ class App(tk.Tk):
             self.set_status(msg)
             self.recompute_all_names()
             self.run_cross_check(silent=True)
+            self.autofit_columns()
             if getattr(self, "_refine", None) is not None:
                 self._finish_refine()
             else:
@@ -1134,22 +1224,76 @@ class App(tk.Tk):
         if not data.get("quiet"):
             messagebox.showinfo(APP_NAME, msg)
 
+    # =============================================================== wzorce nazw
+    def patterns(self) -> list:
+        return filename_patterns.BUILTIN + filename_patterns.user_patterns(self.session_patterns)
+
+    def apply_name_data(self, r: dict, patterns=None):
+        """Dane z nazwy pliku -> rekord (tytul, numer, strona, rok, ew. data do potwierdzenia)."""
+        nd = filename_patterns.parse(r.get("old_name") or Path(r["path"]).name,
+                                     patterns if patterns is not None else self.patterns())
+        r["name_data"] = nd
+        r["pattern"] = nd["pattern"] if nd else "luzne"
+        if not nd:
+            return
+        st = (r.get("status") or "").lower()
+        if st not in ("nowy", "") and "recznie" not in st:
+            return   # rekord juz odczytany - dane z nazwy wezmie przy nastepnym odczycie
+        if nd.get("title") and not r.get("title"):
+            r["title"] = nd["title"]
+        if nd.get("issue"):
+            r["issue_number"], r["issue_suffix"] = nd["issue"], nd.get("suffix")
+        if nd.get("page"):
+            r["page_number"] = nd["page"]
+        r["name_date"] = nd.get("name_date")
+        if nd.get("name_date") and not r.get("date_iso"):
+            r["date_iso"] = nd["name_date"]
+        self.compute_name(r)
+
+    def edit_patterns(self):
+        PatternsDialog(self, self.session_patterns, self.cfg.get("pattern_history") or [],
+                       [r.get("old_name") or "" for r in self.records], self.set_patterns)
+
+    def set_patterns(self, items: list[dict]):
+        self.session_patterns = items
+        hist = [h for h in self.cfg.get("pattern_history") or [] if h not in items]
+        self.cfg["pattern_history"] = (items + hist)[:20]
+        save_config(self.cfg)
+        pats = self.patterns()
+        for r in self.records:
+            self.apply_name_data(r, pats)
+            self.compute_name(r)
+        self.apply_calendar()
+        self.autofit_columns()
+        self.mark_dirty()
+        summary = self.pattern_summary(self.records)
+        self.log(f"Wzorce nazw zmienione. {summary}")
+        self.set_status(f"Wzorce nazw: {summary}")
+
+    @staticmethod
+    def pattern_summary(recs: list[dict]) -> str:
+        counts: dict[str, int] = {}
+        for r in recs:
+            counts[r.get("pattern") or "luzne"] = counts.get(r.get("pattern") or "luzne", 0) + 1
+        return ", ".join(f"{k}: {v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+
     # =============================================================== nazwy
     def compute_name(self, r: dict):
         name, err = naming.build_new_name(r, self.var_title_override.get().strip())
         r["new_name"] = name
-        if not name and r.get("status", "").startswith("odczytano"):
+        r["name_complete"] = not err
+        if err and r.get("status", "").startswith("odczytano"):
             r["status"] = "brak danych"
-            if err and err not in (r.get("note") or ""):
-                r["note"] = err
+            if err not in (r.get("note") or ""):
+                r["note"] = (r.get("note") + "; " if r.get("note") else "") + err
         return name
 
     def recompute_all_names(self):
         for r in self.records:
             self.compute_name(r)
         self.refresh_tree()
-        ready = sum(1 for r in self.records if r.get("new_name"))
-        self.set_status(f"Nowe nazwy gotowe dla {ready}/{len(self.records)} plikow.")
+        ready = sum(1 for r in self.records if r.get("name_complete"))
+        self.set_status(f"Kompletne nowe nazwy: {ready}/{len(self.records)} plikow.")
 
     def edit_selected(self):
         sel = self.tree.selection()
@@ -1180,6 +1324,16 @@ class App(tk.Tk):
         cal = getattr(self, "_verify_cal", None) or self.build_calendar()
         title = rec.get("title") or self.var_title_override.get().strip()
         if issue:
+            # najpierw pozostale strony tego samego wydania (kolekcje stron)
+            key = calendar_model.issue_int(issue)
+            same = [r.get("date_iso") for r in self.records
+                    if r is not rec and r.get("date_iso") and not needs_check(r)
+                    and calendar_model.issue_int(r.get("issue_number")) == key
+                    and calendar_model.norm_title(r.get("title")) == calendar_model.norm_title(title)
+                    and (r.get("issue_suffix") or "") == (rec.get("issue_suffix") or "")]
+            if same:
+                best = max(set(same), key=same.count)
+                return best, issue, f"pozostale strony tego wydania ({same.count(best)} str.)"
             p = cal.predict(title, issue, rec.get("issue_suffix"), exclude=rec)
             if p:
                 tol = f", +-{p.tol} dni" if p.tol else ""
@@ -1220,6 +1374,9 @@ class App(tk.Tk):
         r["report_flag"] = False
         r["vote_conflict"] = False
         r["cal_filled"] = False
+        r["group_filled"] = False
+        r["year_mismatch"] = False
+        r["name_unconfirmed"] = False
         r["outlier"] = False
         r["cal_state"], r["cal_info"] = None, ""
         self.compute_name(r)
@@ -1264,15 +1421,21 @@ class App(tk.Tk):
 
     def apply_calendar(self, show: bool = False) -> dict:
         """Sprawdza odczytane rekordy z kalendarzem wydan (numer -> data)."""
+        cc = collection_checks.check(self.records)
         cal = self.build_calendar()
         counts = calendar_model.check_records(cal, self.records)
         for r in self.records:
-            if r.get("cal_state") == "ok":
-                r["outlier"] = False   # lokalny kalendarz jest mocniejszy od prostej globalnej
+            if r.get("cal_state") == "ok" or r.get("group_ok"):
+                r["outlier"] = False   # lokalne kontrole sa mocniejsze od prostej globalnej
+            if r.get("group_filled"):
+                self.compute_name(r)
         self.refresh_tree()
         msg = (f"Kalendarz wydan: {cal.anchors()} pewnych par numer-data. "
                f"Zgodnych: {counts['ok']}, niezgodnych: {counts['conflict']}, "
                f"bez oceny: {counts['none']}.")
+        if cc["group_ok"] or cc["group_conflict"] or cc["group_filled"] or cc["chrono"]:
+            msg += (f" Strony wydan: zgodnych {cc['group_ok']}, sprzecznych {cc['group_conflict']}, "
+                    f"uzupelnionych {cc['group_filled']}. Naruszona chronologia: {cc['chrono']}.")
         self.log(msg)
         if show:
             messagebox.showinfo(APP_NAME, msg.replace(". ", ".\n") +
@@ -1385,13 +1548,30 @@ class App(tk.Tk):
                                       f"Sprawdz je przed zmiana nazw.")
 
     # =============================================================== rename
+    def rename_scope(self, scope: str) -> list[dict]:
+        visible = {id(r) for r in self.by_iid.values()}
+        certain = lambda r: status_group(r) == "certain"  # noqa: E731
+        if scope == "pewne":
+            return [r for r in self.records if certain(r)]
+        if scope == "zaznaczone":
+            return [r for r in self.records if r.get("checked")]
+        if scope == "widoczne":
+            return [r for r in self.records if id(r) in visible]
+        return [r for r in self.records if id(r) in visible and certain(r)]
+
     def do_rename(self):
-        todo = [r for r in self.records if r.get("checked")]
-        if not todo:
-            messagebox.showinfo(APP_NAME, "Nie zaznaczono zadnego pliku.")
-            return
-        for r in todo:
+        for r in self.records:
             self.compute_name(r)
+        RenameDialog(self, self._rename_run)
+
+    def _rename_run(self, scope: str, include_incomplete: bool):
+        todo = [r for r in self.rename_scope(scope)
+                if "zmieniono" not in (r.get("status") or "")]
+        if not include_incomplete:
+            todo = [r for r in todo if r.get("name_complete")]
+        if not todo:
+            messagebox.showinfo(APP_NAME, "W wybranym zakresie nie ma plikow do zmiany nazwy.")
+            return
 
         plan, skipped = rename_ops.plan_renames(todo, self.var_title_override.get().strip())
         if not plan:
@@ -1462,6 +1642,7 @@ class App(tk.Tk):
             return
         self.records = []
         self.session_path = None
+        self.session_patterns = []
         self.refresh_tree()
         self.txt_detail.delete("1.0", "end")
         self.lbl_thumb.config(image="", text="(zaznacz wiersz)")
@@ -1544,8 +1725,14 @@ class App(tk.Tk):
             self.var_model.set(meta["model"])
         if meta.get("title_override"):
             self.var_title_override.set(meta["title_override"])
+        self.session_patterns = list(meta.get("patterns") or [])
+        for r in self.records:
+            if "name_data" not in r or r.get("name_data") is None:
+                self.apply_name_data(r)   # sesje ze starszej wersji programu
+            self.compute_name(r)
         missing = sum(1 for r in self.records if not Path(r.get("path", "")).exists())
         self.refresh_tree()
+        self.autofit_columns()
         self.mark_dirty(False)
         self._remember_session(path)
         self.title(f"{APP_NAME} {APP_VERSION} - {Path(path).stem}")
@@ -1573,6 +1760,7 @@ class App(tk.Tk):
 
     def _write_session(self, path: str) -> bool:
         meta = {"model": self.var_model.get(), "provider": self.var_provider.get(),
+                "patterns": self.session_patterns,
                 "title_override": self.var_title_override.get(),
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
@@ -1629,7 +1817,9 @@ class App(tk.Tk):
     # =============================================================== rozne
     def clear_cache(self):
         n = cache_db.count()
-        if not messagebox.askyesno(APP_NAME, f"Usunac {n} zapisanych odczytow z cache?\n"
+        if not messagebox.askyesno(APP_NAME, f"Cache: {n} zapisanych odczytow, "
+                                             f"{cache_db.size_mb():.1f} MB\n({CACHE_DB})\n\n"
+                                             f"Usunac wszystkie?\n"
                                              "Ponowny odczyt tych plikow zuzyje limit zapytan."):
             return
         removed = cache_db.clear()
@@ -1641,7 +1831,7 @@ class App(tk.Tk):
         miss = sum(1 for r in self.records if (r.get("status") or "").startswith("brak danych"))
         err = sum(1 for r in self.records if "blad" in (r.get("status") or "").lower())
         out = sum(1 for r in self.records if r.get("outlier"))
-        ready = sum(1 for r in self.records if r.get("new_name"))
+        ready = sum(1 for r in self.records if r.get("name_complete"))
         renamed = sum(1 for r in self.records if "zmieniono" in (r.get("status") or ""))
         messagebox.showinfo(APP_NAME,
                             f"Plikow na liscie:        {total}\n"
@@ -1666,6 +1856,10 @@ class App(tk.Tk):
             "  (wydanie specjalne: 000315-bis)")
 
     def on_close(self):
+        try:
+            self._save_column_widths()   # szerokosci ustawione recznie zostaja na nastepny raz
+        except Exception:
+            pass
         if self.worker and self.worker.is_alive():
             if not messagebox.askyesno(APP_NAME, "Odczyt trwa. Przerwac i zamknac program?"):
                 return
@@ -1798,6 +1992,204 @@ class RefineDialog(tk.Toplevel):
         self.destroy()
         self.on_start(self.recs, self.selected, use_ai, self.var_prov.get(), model,
                       self.var_detail.get())
+
+
+class PatternsDialog(tk.Toplevel):
+    """Wzorce nazw plikow wejsciowych w tej sesji - z podgladem na biezacych plikach."""
+
+    HELP = ("Pola: {lp} liczba porzadkowa, {tytul} tytul, {rok} rok (4 cyfry), {mm} miesiac, "
+            "{dd} dzien, {nr} numer wydania (z dopiskiem bis/s/special), {str} strona "
+            "(z -OST), {*} cokolwiek.\nPrzyklady: {rok}-{nr}   ·   {tytul} {rok} nr {nr}   ·   "
+            "FF{rok}-{mm}\nSpacje dopasuja sie do dowolnej liczby spacji. Wzorce wbudowane "
+            "(kolekcje, format wyjsciowy) dzialaja zawsze i sa sprawdzane jako pierwsze.")
+
+    def __init__(self, parent: App, items: list[dict], history: list[dict], names: list[str], on_ok):
+        super().__init__(parent)
+        self.title("Wzorce nazw plikow")
+        self.geometry("900x640")
+        self.transient(parent)
+        self.grab_set()
+        self.items = [dict(i) for i in items]
+        self.history, self.names, self.on_ok = history, names, on_ok
+
+        ttk.Label(self, text=self.HELP, wraplength=860, justify="left", foreground="#444"
+                  ).pack(anchor="w", padx=10, pady=(10, 6))
+        self.lst = ttk.Treeview(self, columns=("p", "t"), show="headings", height=7)
+        self.lst.heading("p", text="Wzorzec")
+        self.lst.heading("t", text="Tytul dla tych plikow (gdy nie ma go w nazwie)")
+        self.lst.column("p", width=480)
+        self.lst.column("t", width=360)
+        self.lst.pack(fill="x", padx=10)
+        self.lst.bind("<<TreeviewSelect>>", self._select)
+
+        row = ttk.Frame(self)
+        row.pack(fill="x", padx=10, pady=6)
+        ttk.Label(row, text="Wzorzec:").pack(side="left")
+        self.var_p = tk.StringVar()
+        self.cb = ttk.Combobox(row, textvariable=self.var_p, width=44,
+                               values=[h.get("pattern", "") for h in history])
+        self.cb.pack(side="left", padx=4)
+        self.cb.bind("<<ComboboxSelected>>", self._from_history)
+        ttk.Label(row, text="Tytul:").pack(side="left", padx=(8, 0))
+        self.var_t = tk.StringVar()
+        ttk.Entry(row, textvariable=self.var_t, width=26).pack(side="left", padx=4)
+        self.var_p.trace_add("write", lambda *a: self._preview())
+
+        row2 = ttk.Frame(self)
+        row2.pack(fill="x", padx=10)
+        ttk.Button(row2, text="Dodaj", command=self.add).pack(side="left")
+        ttk.Button(row2, text="Zmien zaznaczony", command=self.change).pack(side="left", padx=3)
+        ttk.Button(row2, text="Usun", command=self.remove).pack(side="left")
+        ttk.Button(row2, text="W gore", command=lambda: self.move(-1)).pack(side="left", padx=(12, 3))
+        ttk.Button(row2, text="W dol", command=lambda: self.move(1)).pack(side="left")
+        self.lbl_err = ttk.Label(row2, text="", foreground="#b00020")
+        self.lbl_err.pack(side="left", padx=10)
+
+        ttk.Label(self, text="Podglad na plikach z listy:").pack(anchor="w", padx=10, pady=(10, 2))
+        self.txt = ScrolledText(self, height=14, wrap="none", font=("Consolas", 9))
+        self.txt.pack(fill="both", expand=True, padx=10)
+
+        btns = ttk.Frame(self)
+        btns.pack(pady=8)
+        ttk.Button(btns, text="Zapisz i przelicz", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
+        self._refresh()
+
+    # ----------------------------------------------------------------------
+    def _refresh(self):
+        self.lst.delete(*self.lst.get_children())
+        for i, it in enumerate(self.items):
+            self.lst.insert("", "end", iid=str(i), values=(it["pattern"], it.get("title", "")))
+        self._preview()
+
+    def _select(self, _e=None):
+        sel = self.lst.selection()
+        if sel:
+            it = self.items[int(sel[0])]
+            self.var_p.set(it["pattern"])
+            self.var_t.set(it.get("title", ""))
+
+    def _from_history(self, _e=None):
+        for h in self.history:
+            if h.get("pattern") == self.var_p.get():
+                self.var_t.set(h.get("title", ""))
+
+    def _valid(self) -> dict | None:
+        text = self.var_p.get().strip()
+        try:
+            filename_patterns.compile_pattern(text)
+        except (ValueError, re.error) as exc:
+            self.lbl_err.config(text=str(exc))
+            return None
+        self.lbl_err.config(text="")
+        return {"pattern": text, "title": self.var_t.get().strip()}
+
+    def add(self):
+        it = self._valid()
+        if it:
+            self.items.append(it)
+            self._refresh()
+
+    def change(self):
+        sel = self.lst.selection()
+        it = self._valid()
+        if sel and it:
+            self.items[int(sel[0])] = it
+            self._refresh()
+
+    def remove(self):
+        sel = self.lst.selection()
+        if sel:
+            del self.items[int(sel[0])]
+            self._refresh()
+
+    def move(self, d: int):
+        sel = self.lst.selection()
+        if not sel:
+            return
+        i = int(sel[0])
+        j = i + d
+        if 0 <= j < len(self.items):
+            self.items[i], self.items[j] = self.items[j], self.items[i]
+            self._refresh()
+            self.lst.selection_set(str(j))
+
+    def _preview(self):
+        items = list(self.items)
+        typed = self.var_p.get().strip()
+        if typed and all(typed != i["pattern"] for i in items):
+            try:
+                filename_patterns.compile_pattern(typed)
+                items.append({"pattern": typed, "title": self.var_t.get().strip()})
+                self.lbl_err.config(text="")
+            except (ValueError, re.error) as exc:
+                self.lbl_err.config(text=str(exc))
+        pats = filename_patterns.BUILTIN + filename_patterns.user_patterns(items)
+        res = filename_patterns.preview(pats, self.names)
+        out = [f"Plikow na liscie: {len(self.names)}", ""]
+        for key, n in sorted(res["counts"].items(), key=lambda kv: -kv[1]):
+            out.append(f"{n:6d}  {key}")
+            for name, d in res["samples"].get(key, []):
+                got = ", ".join(f"{k}={v}" for k, v in d.items()
+                                if k in ("lp", "title", "year", "month", "day", "issue", "suffix", "page")
+                                and v not in (None, ""))
+                out.append(f"          {name}\n             -> {got}")
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", "\n".join(out))
+
+    def ok(self):
+        self.destroy()
+        self.on_ok(self.items)
+
+
+class RenameDialog(tk.Toplevel):
+    """Zakres zmiany nazw: pewne / zaznaczone / widoczne / pewne widoczne."""
+
+    SCOPES = [("pewne", "tylko pewne (zielone)"), ("zaznaczone", "tylko zaznaczone (\u2611)"),
+              ("widoczne", "tylko widoczne (po filtrze)"), ("pewne_widoczne", "pewne sposrod widocznych")]
+
+    def __init__(self, parent: App, on_ok):
+        super().__init__(parent)
+        self.title("Zmien nazwy")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.app, self.on_ok = parent, on_ok
+        ttk.Label(self, text="Ktorym plikom zmienic nazwy?", font=("TkDefaultFont", 10, "bold")
+                  ).pack(anchor="w", padx=12, pady=(12, 6))
+        self.var_scope = tk.StringVar(value="pewne")
+        self.var_inc = tk.BooleanVar(value=False)
+        self.labels = {}
+        for key, label in self.SCOPES:
+            rb = ttk.Radiobutton(self, text=label, value=key, variable=self.var_scope, command=self._update)
+            rb.pack(anchor="w", padx=20)
+            self.labels[key] = (rb, label)
+        ttk.Checkbutton(self, text="takze niekompletne (z brakami w nazwie: rrrr, mm-dd, nnnnnn)",
+                        variable=self.var_inc, command=self._update).pack(anchor="w", padx=12, pady=(10, 2))
+        self.lbl = ttk.Label(self, text="", foreground="#00509e")
+        self.lbl.pack(anchor="w", padx=12, pady=6)
+        btns = ttk.Frame(self)
+        btns.pack(pady=(4, 12))
+        ttk.Button(btns, text="Dalej", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
+        self._update()
+
+    def _count(self, scope: str) -> int:
+        recs = [r for r in self.app.rename_scope(scope) if "zmieniono" not in (r.get("status") or "")]
+        if not self.var_inc.get():
+            recs = [r for r in recs if r.get("name_complete")]
+        return len(recs)
+
+    def _update(self):
+        for key, (rb, label) in self.labels.items():
+            rb.config(text=f"{label}:  {self._count(key)}")
+        self.lbl.config(text=f"Plikow do zmiany nazwy: {self._count(self.var_scope.get())} "
+                             f"(bez tych, ktorym juz zmieniono nazwe)")
+
+    def ok(self):
+        scope, inc = self.var_scope.get(), self.var_inc.get()
+        self.destroy()
+        self.on_ok(scope, inc)
 
 
 class PromptDialog(tk.Toplevel):

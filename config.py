@@ -67,8 +67,12 @@ COLUMNS = [
     ("new_name", "Nowa nazwa", 300),
     ("confidence", "Pewnosc", 70),
     ("status", "Status", 120),
+    ("pattern", "Wzorzec", 110),
     ("note", "Uwagi", 200),
 ]
+# maksymalna szerokosc przy automatycznym dopasowaniu (dluzsze teksty widac w panelu obok)
+COLUMN_MAX = {"old_name": 520, "new_name": 540, "title": 220, "status": 200,
+              "pattern": 160, "note": 420}
 
 # Kolumny eksportu (wszystkie dane, jakie program przechowuje)
 EXPORT_COLUMNS = [

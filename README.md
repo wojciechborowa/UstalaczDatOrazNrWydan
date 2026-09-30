@@ -20,7 +20,71 @@ France Football - 1958-06-17 - 000315-bis.pdf          ← wydanie specjalne
 
 - data: `RRRR-MM-DD`
 - numer wydania: dopełniony zerami do 6 cyfr; dopisek (`bis`, `special`, `hs`…) po myślniku
-- numer strony: dopełniony do 3 cyfr, odczytywany ze skanu przez model
+- numer strony: dopełniony do 3 cyfr (z nazwy pliku albo ze skanu)
+
+Każdy plik dostaje nazwę w tym formacie, także gdy czegoś nie udało się ustalić —
+brakujące części zostają znacznikami (Windows nie pozwala na `?` w nazwach):
+
+```
+Placar - 1976-mm-dd - 000123.jpg                       ← nieznany dzień i miesiąc
+Placar - rrrr-mm-dd - 000123.jpg                       ← znany tylko numer
+Nieznany tytul - 1976-05-12 - nnnnnn.jpg               ← znana tylko data
+```
+
+Takie nazwy są „niekompletne” — przy zmianie nazw domyślnie pomijane.
+
+**Kolekcje stron** (`lp - tytuł - rrrr-mm-dd - nr - str`) zachowują nazwę wejściową —
+zmienia się tylko data, reszta (z `lp` na początku) zostaje bez zmian:
+
+```
+0001 - O Fluminense (RJ) - 1954-mm-dd - 022025 - 006-OST.jpg
+0001 - O Fluminense (RJ) - 1954-07-20 - 022025 - 006-OST.jpg
+```
+
+## Wzorce nazw plików wejściowych
+
+Co da się odczytać z samej nazwy pliku, program bierze z nazwy, a AI pyta tylko
+o brakujące dane. *Pliki → Wzorce nazw plików…* (albo przycisk *Wzorce nazw…*) —
+lista wzorców tej sesji, z podglądem na bieżących plikach.
+
+| Pole | Znaczenie |
+|---|---|
+| `{lp}` | liczba porządkowa |
+| `{tytul}` | tytuł gazety |
+| `{rok}` | rok, 4 cyfry (albo `rrrr`) |
+| `{mm}`, `{dd}` | miesiąc, dzień (albo `mm`, `dd` = nieznane) |
+| `{nr}` | numer wydania, z dopiskiem `bis`, `s`, `special`… |
+| `{str}` | numer strony, z `-OST` (ostatnia strona wydania) |
+| `{*}` | cokolwiek — pomijane |
+
+Przykład: pliki `1956-962.pdf`, `2015-2224.pdf` (rok i numer Przeglądu Sportowego) —
+wzorzec `{rok}-{nr}`, tytuł `Przeglad Sportowy`.
+
+- Wzorce wbudowane działają zawsze i są sprawdzane pierwsze: kolekcje stron i wydań
+  (z `lp`) oraz nasz format wyjściowy — pliki już raz przemianowane też są rozpoznawane.
+- Plik dostaje pierwszy pasujący wzorzec; kolumna **Wzorzec** pokazuje który.
+  Pliki bez wzorca to „luźne” (filtr *luzne (bez wzorca)*) — AI ustala wszystko.
+- Po dodaniu plików pasek stanu pokazuje, ile plików pasuje do którego wzorca.
+- Wzorce zapisują się w sesji; wcześniej używane są na liście do wyboru.
+
+### Kolekcje stron
+
+Dla plików z danymi w nazwie prompt podaje modelowi tytuł, rok, numer i stronę —
+model szuka tylko **dnia i miesiąca** (data z nazwy pliku nie jest mu podawana, żeby
+odczyt był niezależny). Dodatkowo:
+
+- **Jedno wydanie = jedna data.** Gdy co najmniej dwie strony tego samego numeru
+  odczytano z tą samą datą (i żadna nie przeczy), wszystkie są pewne; strony bez
+  odczytanej daty dostają datę z pozostałych stron. Strona z inną datą trafia do sprawdzenia.
+- **Chronologia.** Pliki ustawione wg roku z nazwy i `lp` mają daty rosnące albo równe
+  (działa i przy `lp` liczonym od nowa w każdej dekadzie, i ciągłym przez całą kolekcję).
+  Rekord łamiący kolejność wobec większości sąsiadów trafia do sprawdzenia — nie jest
+  odrzucany, bo czasem cofnięcie daty jest prawidłowe.
+- **Rok ze skanu inny niż w nazwie** → do sprawdzenia.
+- **Dwie różne daty na skanie** → obie w uwagach, rekord do sprawdzenia.
+- **Data już jest w nazwie** (np. ustalona innym programem) → traktowana jako do
+  potwierdzenia: AI odczyta to samo → pewne; co innego → do sprawdzenia z obiema
+  wersjami. Plik już odczytany (cache) nie idzie ponownie do AI.
 
 ## Instalacja
 
@@ -204,6 +268,21 @@ Przycisk *Otwórz w przeglądarce PDF* otwiera plik w programie systemowym.
 - Wczytane raporty CSV obejmują też pliki dodane później — nie trzeba ich importować
   ponownie.
 
+## Zmiana nazw
+
+*Zmień nazwy* pyta o zakres: **tylko pewne** (domyślnie), tylko zaznaczone, tylko
+widoczne (po filtrze) albo pewne spośród widocznych — przy każdym widać liczbę plików.
+Pole *także niekompletne* dołącza nazwy ze znacznikami braków. Przed wykonaniem program
+pokazuje przykłady; każdą operację można cofnąć.
+
+## Tabela
+
+- Kolumny dopasowują się do zawartości po dodaniu plików, wczytaniu sesji i odczycie;
+  ręcznie: *Widok → Dopasuj kolumny* (Ctrl+D). Szerokości ustawione ręcznie są
+  zapamiętywane.
+- Prawy przycisk na nagłówku tabeli: pokaż / ukryj kolumny.
+- Pełna treść długich uwag jest w panelu po prawej.
+
 ## Import raportów CSV z innego programu
 
 *Plik → Importuj raporty CSV…* wczytuje raporty dat (np. `raport_dat.csv`) — jeden albo
@@ -276,8 +355,10 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | `calendar_model.py` | kalendarz wydań: numer → data i odwrotnie |
 | `refine.py` | dopracowanie niepewnych: uzupełnianie z kalendarza, głosowanie źródeł |
 | `collection_map.py` | pasek stanu kolekcji |
+| `filename_patterns.py` | wzorce nazw plików wejściowych |
+| `collection_checks.py` | kolekcje: jedno wydanie = jedna data, chronologia `lp` |
 | `rename_ops.py` | zmiana nazw z logiem i cofaniem |
-| `cache_db.py` | cache SQLite po odcisku pliku |
+| `cache_db.py` | cache SQLite po odcisku pliku (tylko wynik danego pliku, nie cała paczka) |
 | `session.py`, `export.py`, `config.py` | sesje, CSV/XLSX, ustawienia |
 
 ## Zalecana kolejność przy dużej partii

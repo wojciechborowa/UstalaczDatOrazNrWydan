@@ -77,7 +77,7 @@ class BaseClient:
     # --- wspolne ------------------------------------------------------------
     def read_batch(self, images: list[tuple[str, str]], model: str | None = None,
                    rules: str | None = None, notes: str | None = None,
-                   should_stop=None, on_wait=None) -> tuple[list[dict], str]:
+                   should_stop=None, on_wait=None, hints: dict | None = None) -> tuple[list[dict], str]:
         """Wysyla obrazy (identyfikator, JPEG w base64) w jednym zapytaniu.
 
         Zwraca (wyniki w kolejnosci `images`, surowa odpowiedz)."""
@@ -89,7 +89,7 @@ class BaseClient:
         if not model:
             raise FatalApiError("Nie wybrano modelu.")
         ids = [i for i, _ in images]
-        prompt = build_user_prompt(ids, rules, notes)
+        prompt = build_user_prompt(ids, rules, notes, hints)
 
         last_err: Exception | None = None
         for attempt in range(1, MAX_RETRIES + 1):

@@ -85,9 +85,17 @@ def clear() -> int:
             n = c.execute("SELECT COUNT(*) FROM results").fetchone()[0]
             c.execute("DELETE FROM results")
             c.commit()
+            c.execute("VACUUM")   # oddaje miejsce na dysku
             return int(n)
         finally:
             c.close()
+
+
+def size_mb() -> float:
+    try:
+        return Path(CACHE_DB).stat().st_size / 1048576
+    except OSError:
+        return 0.0
 
 
 def count() -> int:

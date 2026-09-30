@@ -28,22 +28,22 @@ def needs_check(r: dict) -> bool:
     """Czy rekord powinien trafic do weryfikacji recznej.
 
     Pewne (nie wymagaja sprawdzenia): poprawione recznie, potwierdzone przez dwa
-    niezalezne zrodla, pewne z raportu, zgodne z kalendarzem wydan, albo odczyt AI
-    z wysoka pewnoscia, bez zadnych zastrzezen.
+    niezalezne zrodla, pewne z raportu, zgodne z kalendarzem wydan lub z innymi
+    stronami tego samego wydania, albo odczyt AI z wysoka pewnoscia bez zastrzezen.
     """
     st = (r.get("status") or "").lower()
     if st == "nowy" or "recznie" in st or "zmieniono" in st or "cofnieto" in st:
         return False
-    if st == "potwierdzone":
-        return False
+    # sprzecznosci wygrywaja z kazdym potwierdzeniem
     if (r.get("report_flag") or r.get("vote_conflict") or r.get("cal_filled")
-            or r.get("cal_state") == "conflict"):
+            or r.get("cal_state") == "conflict" or r.get("group_conflict")
+            or r.get("chrono_flag") or r.get("year_mismatch") or r.get("name_unconfirmed")):
         return True
     if "blad" in st or st.startswith("brak danych"):
         return True
-    if not r.get("new_name"):
+    if not r.get("name_complete", bool(r.get("new_name"))):
         return True
-    if r.get("cal_state") == "ok":
+    if st == "potwierdzone" or r.get("group_ok") or r.get("cal_state") == "ok":
         return False
     if r.get("outlier") or "niejednoznaczna" in (r.get("note") or ""):
         return True
@@ -250,8 +250,9 @@ class VerifyDialog(tk.Toplevel):
             info.append(f"pewnosc {r['confidence']:.2f}")
         if r.get("note"):
             info.append(str(r["note"]))
-        if r.get("outlier_info"):
-            info.append(str(r["outlier_info"]))
+        for k in ("outlier_info", "cal_info", "chrono_info"):
+            if r.get(k):
+                info.append(str(r[k]))
         self.lbl_info.config(text="  |  ".join(info))
         for key in ("issue_number", "issue_suffix", "title"):
             val = r.get(key)
