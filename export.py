@@ -13,6 +13,10 @@ def _value(rec: dict, key: str):
         return ""
     if isinstance(v, bool):
         return "tak" if v else "nie"
+    if isinstance(v, (list, tuple)):
+        return "; ".join(str(x) for x in v)
+    if isinstance(v, dict):
+        return ""
     return v
 
 

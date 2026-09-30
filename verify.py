@@ -15,7 +15,7 @@ from tkinter import messagebox, ttk
 
 import naming
 import render
-from config import VERIFY_CONFIDENCE, VERIFY_DPI
+from config import VERIFY_DPI
 
 MONTHS = ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca",
           "sierpnia", "wrzesnia", "pazdziernika", "listopada", "grudnia"]
@@ -25,66 +25,29 @@ ZOOM_MIN, ZOOM_MAX = 0.05, 8.0
 
 
 def needs_check(r: dict) -> bool:
-    """Czy rekord powinien trafic do weryfikacji recznej.
+    """Czy rekord wymaga weryfikacji recznej.
 
-    Pewne (nie wymagaja sprawdzenia): poprawione recznie, potwierdzone przez dwa
-    niezalezne zrodla, pewne z raportu, zgodne z kalendarzem wydan lub z innymi
-    stronami tego samego wydania, albo odczyt AI z wysoka pewnoscia bez zastrzezen.
-    """
+    Po odczycie AI sa tylko dwa stany: zielony (odczyt kompletny i zgodny z nazwa pliku
+    oraz raportem) albo do weryfikacji. Pewnosc modelu nie decyduje o kolorze - widac ja
+    w kolumnie Pewnosc i mozna po niej filtrowac."""
     st = (r.get("status") or "").lower()
-    if st == "nowy" or "recznie" in st or "zmieniono" in st or "cofnieto" in st:
+    if st in ("nowy", "") or "recznie" in st or "zmieniono" in st or "cofnieto" in st:
         return False
-    # sprzecznosci wygrywaja z kazdym potwierdzeniem
-    if (r.get("report_flag") or r.get("vote_conflict") or r.get("cal_filled")
-            or r.get("cal_state") == "conflict" or r.get("group_conflict")
-            or r.get("chrono_flag") or r.get("year_mismatch") or r.get("name_unconfirmed")):
+    if "blad" in st or r.get("issues"):
         return True
-    if "blad" in st or st.startswith("brak danych"):
-        return True
-    if not r.get("name_complete", bool(r.get("new_name"))):
-        return True
-    if st == "potwierdzone" or r.get("group_ok") or r.get("cal_state") == "ok":
-        return False
-    if r.get("outlier") or "niejednoznaczna" in (r.get("note") or ""):
-        return True
-    conf = r.get("confidence")
-    return conf is None or conf < VERIFY_CONFIDENCE
+    return not r.get("name_complete", bool(r.get("new_name")))
 
 
 def check_reasons(r: dict) -> list[str]:
-    """Dlaczego rekord jest do sprawdzenia - krotko, do kolumny Uwagi i paneli."""
+    """Dlaczego rekord jest do weryfikacji - krotko, po ludzku."""
     if not needs_check(r):
         return []
     st = (r.get("status") or "").lower()
-    out = []
-    if r.get("report_flag"):
-        out.append("raport oznaczyl jako watpliwe")
-    if r.get("vote_conflict"):
-        out.append("zrodla podaja rozne daty")
-    if r.get("cal_filled"):
-        out.append("wartosc z kalendarza wydan - do potwierdzenia")
-    if r.get("cal_state") == "conflict":
-        out.append(r.get("cal_info") or "niezgodne z kalendarzem wydan")
-    if r.get("group_conflict") or r.get("chrono_flag"):
-        out.append(r.get("chrono_info") or "niezgodne z innymi stronami / chronologia")
-    if r.get("year_mismatch"):
-        out.append("rok na skanie inny niz w nazwie pliku")
-    if r.get("name_unconfirmed"):
-        out.append("data z nazwy niepotwierdzona odczytem")
+    out = list(r.get("issues") or [])
     if "blad" in st:
-        out.append("blad odczytu")
-    elif st.startswith("brak danych"):
-        out.append("brak danych")
+        out.append("blad odczytu" + (f": {r['note']}" if r.get("note") else ""))
     if not r.get("name_complete", bool(r.get("new_name"))):
-        out.append("niekompletna nazwa")
-    if r.get("outlier") and r.get("outlier_info"):
-        out.append(r["outlier_info"])
-    if "niejednoznaczna" in (r.get("note") or ""):
-        out.append("data niejednoznaczna")
-    conf = r.get("confidence")
-    if not out:
-        out.append("brak pewnosci modelu" if conf is None
-                   else f"niska pewnosc modelu ({conf:.2f} < {VERIFY_CONFIDENCE:.2f})")
+        out.append("niekompletna nowa nazwa" + (f" ({r['name_missing']})" if r.get("name_missing") else ""))
     return out
 
 
@@ -103,7 +66,7 @@ def status_group(r: dict) -> str:
     if "zmieniono" in st or "cofnieto" in st:
         return "renamed"
     if st in ("nowy", ""):
-        return "check" if r.get("report_flag") else "new"
+        return "new"
     if "blad" in st:
         return "error"
     return "check" if needs_check(r) else "certain"
@@ -122,7 +85,8 @@ def open_external(path: str) -> None:
 class VerifyDialog(tk.Toplevel):
     DIGIT_FIELDS = ("day", "month", "year", "issue_number")
 
-    def __init__(self, parent, records: list[dict], on_save, on_close, suggest=None):
+    def __init__(self, parent, records: list[dict], on_save, on_close, start_page: int = 0,
+                 pages_mode: bool = False):
         super().__init__(parent)
         self.title("Weryfikacja")
         self.geometry("1300x860")
@@ -130,8 +94,9 @@ class VerifyDialog(tk.Toplevel):
         self.transient(parent)
 
         self.records = records
-        self.suggest = suggest       # (rekord, numer, data) -> (data, numer, opis) albo None
-        self._sugg = None
+        self.start_page = max(0, int(start_page or 0))   # strona PDF-a wysylana do AI
+        self.pages_mode = pages_mode                      # kolekcja stron: AI ustala dzien i miesiac
+        self._ai = None
         self.on_save = on_save
         self.on_close_cb = on_close
         self.idx = 0
@@ -244,9 +209,9 @@ class VerifyDialog(tk.Toplevel):
 
         sug = ttk.Frame(right)
         sug.pack(fill="x", padx=8, pady=(6, 8))
-        self.lbl_sugg = ttk.Label(sug, text="", wraplength=340, justify="left", foreground="#0a6b2e")
+        self.lbl_sugg = ttk.Label(sug, text="", wraplength=340, justify="left", foreground="#8a1c1c")
         self.lbl_sugg.pack(anchor="w")
-        self.btn_sugg = ttk.Button(sug, text="Przyjmij podpowiedz  [P]", command=self.take_suggestion)
+        self.btn_sugg = ttk.Button(sug, text="Wstaw odczyt AI  [P]", command=self.take_suggestion)
         self.btn_sugg.pack(anchor="w", pady=(3, 0))
         ttk.Label(right, text="Tab - nastepne pole  ·  strzalki - dzien/miesiac/rok o jeden  ·  "
                               "Ctrl+strzalki - poprzedni/nastepny plik", foreground="#666",
@@ -285,11 +250,11 @@ class VerifyDialog(tk.Toplevel):
         info = [f"Status: {r.get('status') or '-'}"]
         if r.get("confidence") is not None:
             info.append(f"pewnosc {r['confidence']:.2f}")
-        if r.get("note"):
-            info.append(str(r["note"]))
         reasons = check_reasons(r)
         if reasons:
-            info.append("do sprawdzenia: " + "; ".join(reasons))
+            info.append("do weryfikacji: " + "; ".join(reasons))
+        elif r.get("note"):
+            info.append(str(r["note"]))
         self.lbl_info.config(text="  |  ".join(info))
         for key in ("issue_number", "issue_suffix", "title"):
             val = r.get(key)
@@ -312,7 +277,7 @@ class VerifyDialog(tk.Toplevel):
             self.pages = render.page_count(r["path"])
         except Exception:
             self.pages = 1
-        self.goto_page(0, force=True)
+        self.goto_page(min(self.start_page, self.pages - 1), force=True)
 
     def move(self, step: int):
         n = self.idx + step
@@ -349,8 +314,7 @@ class VerifyDialog(tk.Toplevel):
         else:
             self.lbl_date.config(text=f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month - 1]} {d.year}",
                                  foreground="#00509e")
-        if not self.vars["issue_number"].get():
-            self._update_suggestion()
+        self._update_suggestion()
 
     def _step(self, what: str, delta: int):
         d = self._date()
@@ -379,36 +343,58 @@ class VerifyDialog(tk.Toplevel):
         self.entries[what].icursor("end")
         return "break"
 
-    # -------------------------------------------------------------- podpowiedz
+    # ------------------------------------------------------------- odczyt AI
+    def _ai_values(self) -> tuple[str | None, str | None, str | None]:
+        """(data, numer, dopisek) odczytane przez AI dla biezacego rekordu."""
+        r = self.records[self.idx]
+        date = r.get("ai_date")
+        issue = sfx = None
+        if r.get("ai_issue") and not self.pages_mode:
+            parts = str(r["ai_issue"]).split(" ", 1)
+            issue, sfx = parts[0], (parts[1] if len(parts) > 1 else None)
+        return date, issue, sfx
+
     def _update_suggestion(self):
-        self._sugg = None
-        if self.suggest is not None:
-            d = self._date()
-            try:
-                self._sugg = self.suggest(self.records[self.idx], self.vars["issue_number"].get().strip(),
-                                          d.isoformat() if d else None)
-            except Exception:
-                self._sugg = None
-        if self._sugg:
-            date_iso, issue, basis = self._sugg
-            what = []
-            if date_iso:
-                what.append(date_iso)
-            if issue:
-                what.append(f"nr {issue}")
-            self.lbl_sugg.config(text=f"Podpowiedz: {', '.join(what)}\n({basis})")
+        """Pod polami: co odczytalo AI, gdy rozni sie od wartosci w polach
+        (w polach jest wartosc z nazwy pliku - ona ma pierwszenstwo)."""
+        r = self.records[self.idx]
+        date, issue, _sfx = self._ai_values()
+        if not r.get("ai") or (not date and not issue):
+            self._ai = None
+            self.lbl_sugg.config(text="AI nie podalo daty ani numeru." if r.get("ai") else "")
+            self.btn_sugg.state(["disabled"])
+            return
+        d = self._date()
+        cur_date = d.isoformat() if d else None
+        cur_issue = self.vars["issue_number"].get().strip().lstrip("0") or None
+        diff = []
+        if date and date != cur_date:
+            y, m, dd = date.split("-")
+            full = f"{int(dd)} {MONTHS[int(m) - 1]} {y}"
+            if cur_date and cur_date[4:] == date[4:]:
+                diff.append(f"inny rok: {y}  (cala data: {full})")
+            else:
+                diff.append(f"data {full}")
+        if issue and issue.lstrip("0") != cur_issue:
+            diff.append(f"nr {issue}")
+        self._ai = (date, issue) if diff else None
+        if diff:
+            self.lbl_sugg.config(text="AI odczytalo " + ", ".join(diff), foreground="#8a1c1c")
             self.btn_sugg.state(["!disabled"])
         else:
-            self.lbl_sugg.config(text="Brak podpowiedzi - za malo pewnych wydan w poblizu.")
+            self.lbl_sugg.config(text="Wartosci w polach zgadzaja sie z odczytem AI.",
+                                 foreground="#0a6b2e")
             self.btn_sugg.state(["disabled"])
 
     def take_suggestion(self):
-        if self._sugg:
-            date_iso, issue, _ = self._sugg
-            if issue and not self.vars["issue_number"].get():
-                self.vars["issue_number"].set(str(issue))
-            if date_iso:
-                self._set_date(date_iso)
+        """Wstawia do pol wartosci odczytane przez AI."""
+        date, issue, sfx = self._ai_values()
+        if self._ai:
+            if issue:
+                self.vars["issue_number"].set(issue)
+                self.vars["issue_suffix"].set(sfx or "")
+            if date:
+                self._set_date(date)
             self.entries["day"].focus_set()
         return "break"
 
@@ -459,7 +445,7 @@ class VerifyDialog(tk.Toplevel):
         key = (path, self.page)
         self._token += 1
         token = self._token
-        fit = self.fit_width if self.page == 0 else self.fit_page
+        fit = self.fit_width if self.page == min(self.start_page, self.pages - 1) else self.fit_page
         if key in self._cache:
             self._set_image(self._cache[key], fit)
             return "break"
@@ -472,7 +458,8 @@ class VerifyDialog(tk.Toplevel):
             try:
                 img = render.load_page(path, key[1], dpi=VERIFY_DPI)
             except Exception as exc:
-                self.after(0, lambda: self._show_error(token, str(exc)))
+                msg = str(exc)
+                self.after(0, lambda: self._show_error(token, msg))
                 return
             self.after(0, lambda: self._loaded(token, key, img, fit))
 

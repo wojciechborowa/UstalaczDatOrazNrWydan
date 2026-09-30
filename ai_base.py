@@ -48,11 +48,15 @@ class BaseClient:
 
     provider = ""
 
-    def __init__(self, api_key: str, model: str = "", rpm: int = FREE_RPM):
+    def __init__(self, api_key: str, model: str = "", rpm: int = FREE_RPM,
+                 usage=None, limits: dict | None = None):
         self.api_key = (api_key or "").strip()
         self.model = model
         self.limiter = RateLimiter(rpm)
         self.session = requests.Session()
+        # wlasne liczniki programu (usage.Usage) - pilnuja limitow na minute i na dzien
+        self.usage = usage
+        self.limits = dict(limits or {"rpm": rpm})
 
     # --- do nadpisania ----------------------------------------------------
     def _post(self, model: str, images: list[tuple[str, str]], prompt: str) -> requests.Response:
@@ -61,6 +65,10 @@ class BaseClient:
     def _extract(self, body: dict) -> str:
         """Tekst odpowiedzi modelu z ciala odpowiedzi HTTP."""
         raise NotImplementedError
+
+    def _tokens(self, body: dict) -> int | None:
+        """Liczba tokenow zuzytych przez zapytanie (z odpowiedzi), jesli dostawca ja podaje."""
+        return None
 
     def _fatal_for(self, r: requests.Response) -> str | None:
         """Komunikat, jesli odpowiedz oznacza blad, ktorego nie warto ponawiac."""
@@ -77,7 +85,8 @@ class BaseClient:
     # --- wspolne ------------------------------------------------------------
     def read_batch(self, images: list[tuple[str, str]], model: str | None = None,
                    rules: str | None = None, notes: str | None = None,
-                   should_stop=None, on_wait=None, hints: dict | None = None) -> tuple[list[dict], str]:
+                   should_stop=None, on_wait=None, hints: dict | None = None,
+                   on_throttle=None) -> tuple[list[dict], str]:
         """Wysyla obrazy (identyfikator, JPEG w base64) w jednym zapytaniu.
 
         Zwraca (wyniki w kolejnosci `images`, surowa odpowiedz)."""
@@ -95,7 +104,13 @@ class BaseClient:
         for attempt in range(1, MAX_RETRIES + 1):
             if should_stop and should_stop():
                 raise RuntimeError("przerwano")
-            self.limiter.wait(should_stop)
+            handle = None
+            if self.usage is not None:
+                # rzuca usage.DailyLimitReached, gdy licznik dzienny doszedl do limitu
+                handle = self.usage.acquire(self.usage.key(self.provider, model, self.api_key),
+                                            self.limits, len(images), should_stop, on_throttle)
+            else:
+                self.limiter.wait(should_stop)
             if should_stop and should_stop():
                 raise RuntimeError("przerwano")
 
@@ -108,7 +123,19 @@ class BaseClient:
 
             if r.status_code == 200:
                 try:
-                    text = self._extract(r.json())
+                    body = r.json()
+                except ValueError:
+                    body = None
+                if self.usage is not None:
+                    try:
+                        tokens = self._tokens(body) if isinstance(body, dict) else None
+                    except Exception:
+                        tokens = None
+                    self.usage.settle(handle, tokens)
+                try:
+                    if body is None:
+                        raise ValueError("odpowiedz HTTP nie jest JSON-em")
+                    text = self._extract(body)
                     return parse_response(text, ids), text
                 except Exception as exc:
                     # zla struktura odpowiedzi - model bywa niedeterministyczny, ponawiamy

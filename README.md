@@ -7,8 +7,43 @@ winietę tak, jak czyta ją człowiek.
 Działa uniwersalnie: France Football, Placar, Kicker, World Soccer i dowolny inny tytuł,
 w dowolnym języku i dowolnej dekadzie. Prompt nie zawiera nazwy żadnej gazety.
 
-Obsługiwane wejście: `.pdf` (czytana jest pierwsza strona) oraz `.jpg .jpeg .png .bmp
-.tif .tiff .webp` (pojedyncze strony).
+Obsługiwane wejście: `.pdf` (czytana jest wybrana strona, domyślnie pierwsza) oraz
+`.jpg .jpeg .png .bmp .tif .tiff .webp` (pojedyncze strony i rozkładówki).
+
+## Tryb sesji: Kolekcja wydań albo Kolekcja stron
+
+Przy nowej sesji (i przy dodaniu pierwszych plików) program pyta o tryb:
+
+| Tryb | Pliki | Co ustala AI | Co jest z nazwy pliku |
+|---|---|---|---|
+| **Kolekcja wydań** | PDF-y z całymi wydaniami | tytuł, datę i numer wydania — z wybranej strony PDF-a (domyślnie 1.) | to, co nazwa jednoznacznie zawiera — tylko do porównania |
+| **Kolekcja stron** | skany pojedynczych stron / rozkładówek | **dzień i miesiąc** | tytuł, rok, numer wydania, numer strony |
+
+*Plik → Ustawienia sesji…* (albo przycisk *Ustawienia sesji…* nad tabelą) zmienia tryb
+i stronę wysyłaną do AI — dla gazet, które datę i numer drukują np. na stronie 3.
+Tryb i strona zapisują się w sesji. Starsza sesja (bez trybu) przy otwarciu pyta o tryb
+z propozycją wg typu plików.
+
+**Tylko odpowiedź AI.** Program niczego nie uzupełnia z kalendarza wydań, interpolacji,
+sąsiednich plików ani chronologii — takich funkcji już nie ma. Dane wejściowe to nazwa
+pliku (i ewentualnie zaimportowany raport); z nimi porównywany jest odczyt AI:
+
+- odczyt **kompletny i zgodny** z nazwą pliku (i raportem) → **zielony**,
+- odczyt niekompletny, niejednoznaczny, z nieistniejącą datą albo **niezgodny** z nazwą
+  / raportem → **do weryfikacji**, a w kolumnie *Uwagi* krótko, po ludzku, dlaczego
+  (np. „AI odczytało rok 1955, a w nazwie pliku jest 1954”),
+- przy niezgodności **wygrywa nazwa pliku** — to ona jest w polach i w nowej nazwie;
+  odczyt AI widać w *Uwagach*, w panelu szczegółów i na dole okna weryfikacji.
+
+Z nazwy pliku porównywane jest tylko to, co jednoznaczne: pola wzorca nazwy, pełna data
+(`1958-06-17`, `17.06.1958`, `17 juin 1958`, `June 17, 1958`), miesiąc słownie z rokiem,
+czterocyfrowy rok (gdy w nazwie jest dokładnie jeden) i oznaczony numer (`nr 638`, `n° 638`,
+`#638`). Samotna liczba (np. `12`) jest pomijana — nie wiadomo, czy to dzień, numer czy
+strona. Tytułu nie porównujemy (skróty w nazwach dawałyby fałszywe alarmy).
+
+**Pewność modelu nie decyduje o kolorze.** Kolumna *Pewność* pokazuje wartość z AI, można
+po niej sortować, a pole **Pewność** nad tabelą filtruje: gotowe progi (`<0.8`, `>=0.9`,
+`0.5-0.8`, `brak`…) albo własny wpis zatwierdzony Enterem.
 
 ## Format nazw wyjściowych
 
@@ -43,8 +78,9 @@ zmienia się tylko data, reszta (z `lp` na początku) zostaje bez zmian:
 
 ## Wzorce nazw plików wejściowych
 
-Co da się odczytać z samej nazwy pliku, program bierze z nazwy, a AI pyta tylko
-o brakujące dane. *Pliki → Wzorce nazw plików…* (albo przycisk *Wzorce nazw…*) —
+Co da się odczytać z samej nazwy pliku, program bierze z nazwy. W kolekcji stron AI
+pyta tylko o dzień i miesiąc; w kolekcji wydań AI czyta wszystko niezależnie, a dane
+z nazwy służą do porównania. *Pliki → Wzorce nazw plików…* (albo przycisk *Wzorce nazw…*) —
 lista wzorców tej sesji, z podglądem na bieżących plikach.
 
 | Pole | Znaczenie |
@@ -73,24 +109,16 @@ wzorzec `{rok}-{nr}`, tytuł `Przeglad Sportowy`.
 
 ### Kolekcje stron
 
-Dla plików z danymi w nazwie prompt podaje modelowi tytuł, rok, numer i stronę —
-model szuka tylko **dnia i miesiąca** (data z nazwy pliku nie jest mu podawana, żeby
-odczyt był niezależny). Dodatkowo:
+Dla plików z danymi w nazwie prompt podaje modelowi tytuł, rok, numer i stronę oraz to,
+że to pojedyncza strona albo rozkładówka ze środka wydania — model szuka tylko **dnia
+i miesiąca**. Data z nazwy pliku nie jest mu podawana, żeby odczyt był niezależny.
 
-- **Jedno wydanie = jedna data.** Gdy co najmniej dwie strony tego samego numeru
-  odczytano z tą samą datą (i żadna nie przeczy), wszystkie są pewne; strony bez
-  odczytanej daty dostają datę z pozostałych stron. Strona z inną datą trafia do sprawdzenia.
-- **Chronologia.** Pliki ustawione wg roku z nazwy i `lp` mają daty rosnące albo równe
-  (działa i przy `lp` liczonym od nowa w każdej dekadzie, i ciągłym przez całą kolekcję).
-  Nie w każdej kolekcji to prawda, więc *Narzędzia → Chronologia lp (ta sesja)* ma trzy
-  ustawienia: **wyłączona** (w ogóle nie sprawdzana), **tylko ostrzeżenie** (domyślnie —
-  uwaga w kolumnie Uwagi, kolor bez zmian) i **wpływa na pewność** (naruszenie
-  chronologii = rekord do sprawdzenia). Ustawienie zapisuje się w sesji.
-- **Rok ze skanu inny niż w nazwie** → do sprawdzenia.
-- **Dwie różne daty na skanie** → obie w uwagach, rekord do sprawdzenia.
-- **Data już jest w nazwie** (np. ustalona innym programem) → traktowana jako do
-  potwierdzenia: AI odczyta to samo → pewne; co innego → do sprawdzenia z obiema
-  wersjami. Plik już odczytany (cache) nie idzie ponownie do AI.
+- **Rok ze skanu inny niż w nazwie** → do weryfikacji; w polach zostaje rok z nazwy,
+  a okno weryfikacji pokazuje na dole, jaki rok odczytało AI.
+- **Dwie różne daty na skanie** → obie w uwagach, rekord do weryfikacji.
+- **Data już jest w nazwie** (np. ustalona innym programem) → porównywana z odczytem AI:
+  zgodna = zielony, inna = do weryfikacji.
+- Nie ma żadnych kontroli ciągłości, chronologii `lp` ani „jedno wydanie = jedna data”.
 
 ## Instalacja
 
@@ -104,72 +132,83 @@ w Windows i macOS jest w standardowej instalacji).
 
 ## Jak używać
 
-1. **Zakładka „API i model"** — wklej klucz z openrouter.ai, kliknij *Zapisz klucz*, potem
-   *Testuj klucz i limity* (pokaże, ile darmowych zapytań zostało Ci na dziś).
+1. **Zakładka „API i model"** — wybierz dostawcę, wklej klucz, *Zapisz klucz*, *Testuj klucz*.
    Następnie *Pobierz listę modeli* — lista jest ograniczona do modeli przyjmujących obrazy.
    Zaznacz model i kliknij *Użyj zaznaczonego modelu*.
-2. **Zakładka „Pliki i wyniki"** — *Dodaj folder* (opcjonalnie z podfolderami) lub
+2. **Nowa sesja** (Ctrl+N) — wybierz tryb: Kolekcja wydań (i stronę dla AI) albo
+   Kolekcja stron.
+3. **Zakładka „Pliki i wyniki"** — *Dodaj folder* (opcjonalnie z podfolderami) lub
    *Dodaj pliki*. Zaznaczaj pojedynczo (klik w kwadracik), grupowo (Ctrl/Shift + spacja)
    albo przyciskami *Zaznacz wszystko / Odwróć*.
-3. **Odczytaj daty za pomocą AI** — program pokaże, ile zapytań to zajmie, i ruszy.
-   Możesz w każdej chwili wcisnąć *Pauza* albo *Stop*.
-4. **Sprawdź spójność** — sito błędów opisane niżej. Podejrzane wiersze zostaną podświetlone.
-5. **Zmień nazwy** — dopiero teraz program dotyka dysku. Operacja jest logowana i odwracalna
+4. **Odczytaj daty za pomocą AI** — program pokaże, ile zapytań to zajmie, czy wystarczy
+   limitu dziennego i ile to potrwa, i ruszy. *Pauza* i *Stop* działają w każdej chwili.
+5. **Weryfikuj** — przejdź żółte rekordy (Enter zapisuje, P wstawia odczyt AI).
+6. **Zmień nazwy** — dopiero teraz program dotyka dysku. Operacja jest logowana i odwracalna
    przyciskiem *Cofnij zmianę nazw*.
 
-## Limity OpenRoutera, o których trzeba wiedzieć
+## Limity i liczniki zużycia
 
-Modele z sufiksem `:free` mają 20 zapytań na minutę oraz **50 zapytań dziennie**, a po
-jednorazowym zakupie 10 kredytów — **1000 dziennie**. Limity są liczone globalnie na konto,
-więc zakładanie dodatkowych kluczy nic nie daje.
+Program sam liczy, ile wysłał — bez pytania konta u dostawcy. Liczniki są osobne dla
+każdego dostawcy, modelu i klucza:
 
-Przy 2000 plików i domyślnym batchu 5 skanów na zapytanie wychodzi **400 zapytań**, czyli
-jeden dzień pracy po doładowaniu konta. Bez doładowania byłoby to osiem dni.
+- zapytania i tokeny w ostatniej minucie (tokeny z odpowiedzi API),
+- zapytania i tokeny w bieżącej dobie limitu — Gemini odnawia limit o północy czasu
+  pacyficznego (ok. 9:00 w Polsce), OpenRouter o północy UTC.
 
-Program sam pilnuje 20 zapytań na minutę i ponawia z rosnącym odstępem, honorując nagłówek
-`Retry-After`.
+Limity modelu (**zapytań/min, tokenów/min, zapytań/dzień**) ustawiasz w zakładce API
+(*Parametry przetwarzania*); przycisk *Domyślne dla modelu* wpisuje orientacyjne wartości
+darmowego planu — dostawcy je zmieniają, a API ich nie podaje, więc warto je porównać
+z AI Studio / OpenRouterem. `0` = bez limitu. Na tej podstawie program:
+
+- przed startem podpowiada, ile zapytań zajmie odczyt, czy wystarczy limitu dziennego
+  (i ile skanów zmieści się dziś) oraz ile to potrwa,
+- zwalnia przed limitem zapytań i tokenów na minutę, zamiast łapać błąd 429,
+- po wyczerpaniu limitu dziennego zatrzymuje odczyt z informacją, kiedy limit się odnowi —
+  nieodczytane pliki zostają zaznaczone, wystarczy później wznowić,
+- pokazuje bieżące zużycie nad tabelą, w zakładce API i w *Narzędzia → Zużycie limitów AI*.
+
+Liczniki nie widzą zapytań wysłanych tym samym kluczem z innych programów.
+
+**Zapisane klucze.** Pod polem klucza jest lista zapisanych kluczy (np. płatny i darmowy)
+— przełączasz je ręcznie. Program nie rotuje kluczy automatycznie: limity darmowego planu
+dotyczą projektu / konta, a omijanie ich wieloma kontami łamie zasady dostawców.
+
+OpenRouter: modele `:free` mają 20 zapytań na minutę oraz **50 dziennie**, a po
+jednorazowym zakupie 10 kredytów **1000 dziennie** — limity liczone są na konto.
 
 ## Dlaczego batch po 5 skanów
 
-W jednym zapytaniu jedzie kilka obrazów naraz — limit liczy zapytania, nie obrazy. Obrazy
-idą w znanej kolejności, a model zwraca tablicę JSON z polem `index`, które program mapuje
-z powrotem na nazwy plików. Nie trzeba więc niczego nadpisywać na stronach.
+W jednym zapytaniu jedzie kilka obrazów naraz — limit liczy zapytania, nie obrazy. Każdy
+skan ma na obrazie identyfikator, a model zwraca tablicę JSON z tym identyfikatorem, więc
+wyniki nie pomylą się między plikami.
 
 Im większy batch, tym większe ryzyko, że model przesunie odpowiedzi albo zwróci ich za mało.
-Program to wykrywa (sprawdza długość tablicy i ciągłość indeksów) i **cały taki batch
-ponawia pojedynczo**, zamiast zapisać przesunięte dane. Wartość 5 to rozsądny kompromis;
-można ją zmienić w zakładce API.
+Program to wykrywa i **cały taki batch ponawia pojedynczo**, zamiast zapisać przesunięte
+dane. Wartość 5 to rozsądny kompromis; można ją zmienić w zakładce API. Liczba skanów
+w zapytaniu jest stała — losowanie jej nic nie daje, a psuje powtarzalność odczytu.
 
-## Sita jakości
-
-**Walidacja krzyżowa numer ↔ data.** Periodyk wydaje numery liniowo w czasie. Program
-dopasowuje odporną prostą (estymator Theila-Sena) do par (data, numer) osobno dla każdego
-tytułu i oznacza rekordy mocno odstające od tej prostej. To wyłapuje literówki modelu
-lepiej niż jego własne pole „pewność" — numer 8632 wśród 620…650 rzuca się w oczy
-natychmiast. Wymaga co najmniej 6 poprawnie odczytanych rekordów danego tytułu.
-
-**Uzupełnianie brakującego roku.** Wiele okładek podaje tylko dzień i miesiąc. Model ma
-wtedy zakaz zgadywania roku (zwraca `null`), a program dolicza go z ciągu numerów, rozpoznając
-nazwy miesięcy po francusku, niemiecku, portugalsku, angielsku, włosku, hiszpańsku i polsku.
-Sprawdza też sąsiednie lata, żeby poprawnie obsłużyć numery na przełomie grudnia i stycznia.
-Każdy tak uzupełniony rekord dostaje adnotację w kolumnie „Uwagi".
+## Zasady odczytu i cache
 
 **Zakaz zgadywania.** Prompt wymaga `null` wszędzie tam, gdzie czegoś nie widać, oraz
-pierwszej daty z zakresu („du 15 au 21 mars"). Zabrania też amerykańskiej kolejności
-miesiąc/dzień i każe ufać nazwie miesiąca, gdy jest wydrukowana.
+pierwszej daty z zakresu („du 15 au 21 mars"). Każe ufać nazwie miesiąca, gdy jest
+wydrukowana, a przy niejasnej kolejności dzień/miesiąc podać obie możliwe daty.
 
 **Cache po odcisku pliku.** Wynik każdego odczytu ląduje w SQLite pod kluczem
-(odcisk pliku, model). Przerwany przebieg wznawia się bez zużywania limitu, a zmiana modelu
-wymusza ponowny odczyt.
+(odcisk pliku, model, tryb, strona). Przerwany przebieg wznawia się bez zużywania limitu,
+a zmiana modelu albo strony wymusza ponowny odczyt.
 
-**Podgląd i ręczna poprawka.** Panel po prawej pokazuje górny pasek strony — ten sam
-fragment, który czytał model — więc 2000 rekordów da się zweryfikować wzrokiem. Podwójny
-klik w wiersz otwiera okno edycji.
+**Ponów odczyt AI.** *Narzędzia* (albo prawy przycisk na wierszu) → *Ponów odczyt AI
+podświetlonych* — nowe zapytanie bez cache, opcjonalnie z **obrazem dokładnym** (wyższa
+rozdzielczość i powiększona góra strony nad całą stroną, jeden plik na zapytanie). Wynik
+podlega tym samym zasadom: zielony albo do weryfikacji.
+
+**Podgląd i ręczna poprawka.** Panel po prawej pokazuje górny pasek strony wysyłanej do AI,
+odczyt AI, dane z nazwy pliku i z raportu. Podwójny klik w wiersz otwiera okno edycji.
 
 ## Dostawcy AI: OpenRouter i Google Gemini
 
-W zakładce **API i model** wybierasz dostawcę. Każdy ma własny klucz, model i limit
-zapytań na minutę — przełączanie niczego nie gubi.
+W zakładce **API i model** wybierasz dostawcę. Każdy ma własny klucz, model i limity
+— przełączanie niczego nie gubi.
 
 - **OpenRouter** — klucz z openrouter.ai/keys; darmowo 50 zapytań dziennie,
   po jednorazowym zakupie 10 kredytów 1000 dziennie.
@@ -190,87 +229,50 @@ Domyślne zasady: data tylko z winiety, żywej paginy lub stopki (nigdy z artyku
 reklam ani kalendarzy), bez zgadywania, bez tłumaczenia odczytu, a gdy kolejność
 dzień/miesiąc jest niejasna — obie możliwe daty w uwagach i rekord do sprawdzenia.
 
-## Kolory: co jest pewne, a co do sprawdzenia
+## Kolory: zielony albo do weryfikacji
 
 | Kolor | Znaczenie |
 |---|---|
-| zielony | **pewne** — można zmieniać nazwy |
-| pomarańczowy | do sprawdzenia |
-| czerwony | błąd odczytu |
+| zielony | odczyt AI kompletny i zgodny z nazwą pliku / raportem, albo poprawiony ręcznie — można zmieniać nazwy |
+| pomarańczowy | do weryfikacji |
+| czerwony | błąd odczytu (też do weryfikacji) |
 | niebieski | nazwa już zmieniona |
 | szary | jeszcze nieczytane |
-| pomarańczowe tło | niezgodne z kalendarzem wydań albo odstające w walidacji |
 
-Przy rekordzie do sprawdzenia kolumna *Uwagi* zawsze mówi dlaczego (`DO SPRAWDZENIA: …`).
-Po wczytaniu sesji wszystkie kontrole są liczone od nowa. Numer wydania wzięty z nazwy
-pliku uznawany jest za pewny — kontrola „numer odstaje od ciągu” go nie ocenia.
+Przy rekordzie do weryfikacji kolumna *Uwagi* zawsze mówi dlaczego (`DO WERYFIKACJI: …`).
+Po wczytaniu sesji ocena jest liczona od nowa.
 
-Pewny (zielony) jest rekord poprawiony ręcznie, potwierdzony przez dwa niezależne źródła,
-pewny w zaimportowanym raporcie, zgodny z kalendarzem wydań albo odczytany przez AI
-z pewnością ≥ 0,80 bez żadnych zastrzeżeń. Filtry **„pewne”** i **„do sprawdzenia”**
-pokazują te grupy.
+Filtry: *do weryfikacji*, *zielone (pewne)*, *niezgodne z nazwą/raportem*, *niekompletny
+odczyt*, *z raportem*, *bez nowej nazwy*, *luźne (bez wzorca)* — plus filtr **Pewność**.
 
 **Pasek stanu kolekcji** nad tabelą pokazuje wszystkie pliki naraz (w kolejności tabeli),
 każdy w kolorze swojego stanu. Gdy na jeden punkt paska przypada kilka plików, widać
 najgorszy z nich. Kliknięcie przenosi do tego pliku w tabeli; najechanie myszą pokazuje,
 co to za plik. Pod paskiem są liczniki grup.
 
-## Kalendarz wydań
-
-Z pewnych par numer–data (raporty, rekordy ręczne i potwierdzone, pewne odczyty AI)
-program wylicza, jaka data powinna stać przy danym numerze: interpoluje między kilkoma
-najbliższymi pewnymi wydaniami i bierze medianę, więc jedna błędna kotwica nie psuje
-wyniku; restarty numeracji i numery specjalne są rozpoznawane. Przy sprawdzaniu rekordu
-jego własna wartość jest pomijana — zgodność znaczy „sąsiednie, niezależne wydania
-potwierdzają tę datę”.
-
-Na 3335 pewnych wydaniach France Football kalendarz przewidział datę poprawnie
-w 99,6% przypadków (test „z ukryciem” każdego wydania po kolei).
-
-Numeracja wydań potrafi zaczynać się od nowa (ten sam numer w 1958 i 1968), więc kalendarz
-porównuje numer tylko z pewnymi wydaniami z tego samego okresu (±1,5 roku od roku z nazwy
-pliku albo od odczytanej daty). Tak samo *Sprawdź spójność* liczy osobno dla każdego roku,
-a strony „tego samego wydania” muszą mieć też ten sam rok w nazwie.
-
 Sortowanie po kolumnie *Stara nazwa* ustawia pliki kolekcji wg roku z nazwy, a potem `lp` —
 także gdy `lp` zaczyna się od nowa w każdej dekadzie.
 
-Kalendarz sprawdza wyniki automatycznie po odczycie AI i imporcie raportów; ręcznie:
-*Narzędzia → Sprawdź z kalendarzem wydań*.
+## Weryfikacja
 
-## Dopracuj niepewne (jeden przycisk)
+Przycisk **Weryfikuj (N)** (albo Ctrl+W) pyta o zakres: **wszystkie**, **widoczne**
+(po filtrze), **zaznaczone** (☑), **widoczne i zaznaczone**, a gdy w tabeli podświetlisz
+kilka wierszy — także **podświetlone**. Pole *tylko do weryfikacji* (domyślnie włączone)
+pomija zielone i nieczytane; po jego wyłączeniu można przejrzeć także zielone.
+Przy każdym zakresie widać liczbę rekordów.
 
-Przycisk **Dopracuj niepewne** na dole okna:
-1. **Kalendarz wydań** (bez zapytań) — zgodne rekordy robią się zielone; brakującą datę
-   (przy znanym numerze) albo numer (przy znanej dacie) uzupełnia jako kandydata.
-2. **Drugi odczyt AI** tego, co dalej jest niepewne — wybranym dostawcą i modelem
-   (najlepiej innym niż za pierwszym razem), opcjonalnie obrazem dokładnym: wyższa
-   rozdzielczość i powiększona góra strony nad całą stroną, jeden plik na zapytanie.
-3. **Głosowanie** — rekord robi się pewny tylko, gdy zgadzają się dwa niezależne źródła
-   (dwa odczyty AI albo odczyt i kalendarz). Gdy dwa odczyty dają różne, ale każdy spójny
-   wynik, rekord zostaje do sprawdzenia z opisem obu wersji.
-4. **Podsumowanie** — ile zrobiło się pewnych, ile zostało do ręcznego sprawdzenia.
-
-*Narzędzia → Ponów odczyt podświetlonych (dokładniej)…* robi to samo dla wybranych
-wierszy, niezależnie od ich stanu.
-
-## Weryfikacja niepewnych odczytów
-
-Przycisk **Weryfikuj (N)** (albo Ctrl+W) otwiera okno z dużym podglądem strony i polami
-do poprawki — po kolei dla rekordów „do sprawdzenia”. Gdy w tabeli podświetlisz kilka
-wierszy, weryfikacja obejmie właśnie je.
-
-Data ma osobne pola **dzień / miesiąc / rok**, pod nimi dzień tygodnia wpisanej daty
-(łatwo porównać z okładką). Program podpowiada datę i numer z kalendarza wydań albo
-z sąsiednich plików na liście — klawisz **P** przyjmuje podpowiedź. Podpowiedź odświeża
-się, gdy zmienisz numer wydania.
+Okno ma duży podgląd strony (w kolekcji wydań otwiera się na stronie wysyłanej do AI)
+i pola do poprawki. Data ma osobne pola **dzień / miesiąc / rok**, pod nimi dzień tygodnia
+wpisanej daty. W polach są wartości rekordu — przy niezgodności te z nazwy pliku — a na
+dole okna **to, co odczytało AI**, gdy jest inne (np. „AI odczytało inny rok: 1955”).
+Klawisz **P** wstawia odczyt AI do pól.
 
 | Klawisz | Działanie |
 |---|---|
 | Enter | zapisz i przejdź do następnego |
 | Tab | następne pole |
 | ↑ / ↓ w polu dnia, miesiąca, roku | o jeden w przód / w tył (z przejściem przez miesiąc i rok) |
-| P (w polach liczbowych) albo Alt+P | przyjmij podpowiedź |
+| P (w polach liczbowych) albo Alt+P | wstaw odczyt AI |
 | Esc / Ctrl+↓ | pomiń |
 | Ctrl+↑ | poprzedni rekord |
 | PageUp / PageDown | poprzednia / następna strona PDF-a |
@@ -314,12 +316,11 @@ Pliki z listy są dopasowywane do wierszy raportu po kolei:
 2. pełna ścieżka,
 3. nazwa pliku + rozmiar.
 
-Co się dzieje z dopasowanym rekordem:
-- wiersz **pewny** → data, numer (z dopiskiem `bis`/`special`) i tytuł trafiają do
-  rekordu, status „z raportu”, rekord zostaje odznaczony, więc nie idzie już do AI,
-- wiersz **wątpliwy / brak** → podpowiedź w uwagach, rekord trafia do „do sprawdzenia”,
-- **raporty podają różne dane** dla tego samego pliku → rekord trafia do „do sprawdzenia”,
-- rekord **poprawiony ręcznie** nie jest nadpisywany.
+**Raport to dane wejściowe do porównania — tak jak nazwa pliku.** Nie zmienia pól rekordu
+i sam nie robi go zielonym: dane z raportu są zapamiętane przy rekordzie (widać je
+w panelu szczegółów, filtr *z raportem*), a po odczycie AI program je porównuje —
+zgodne = zielony, inna data lub numer = do weryfikacji z informacją, co podaje raport.
+Rekord poprawiony ręcznie nie jest ruszany.
 
 Skróty liczone są w tle i zapamiętywane w sesji, więc kolejny import ich nie przelicza.
 
@@ -362,14 +363,15 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 | Spacja | Przełącz zaznaczenie podświetlonych wierszy |
 | P | Otwórz podświetlony plik w domyślnym programie (też prawy przycisk myszy) |
 | F5 | Odśwież tabelę |
-| Ctrl+W | Weryfikacja niepewnych odczytów |
+| Ctrl+W | Weryfikacja (z wyborem zakresu) |
 
 ## Eksport
 
 *Plik → Eksport do CSV / do Excela* (gdy brakuje biblioteki `openpyxl`, program proponuje
 ją doinstalować albo zapisuje CSV) zapisuje wszystkie kolumny, jakie program przechowuje:
 obok daty i numeru także język, datę w oryginalnym brzmieniu, nazwę miesiąca, informację
-czy rok był nadrukowany, pewność, użyty model, status, uwagi i surową odpowiedź modelu.
+czy rok był nadrukowany, pewność, datę i numer według AI, powód weryfikacji, użyty model,
+status, uwagi i surową odpowiedź modelu.
 Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 
 ## Struktura
@@ -386,12 +388,11 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 | `prompt.py` | uniwersalny prompt i odporny parser JSON |
 | `render.py` | PDF/obraz → JPEG w base64 (rasteryzacja, nie OCR) |
 | `naming.py` | budowa nazw plików, kolizje |
-| `validate.py` | walidacja krzyżowa, uzupełnianie roku, nazwy miesięcy |
-| `calendar_model.py` | kalendarz wydań: numer → data i odwrotnie |
-| `refine.py` | dopracowanie niepewnych: uzupełnianie z kalendarza, głosowanie źródeł |
+| `assess.py` | ocena rekordu: zielony albo do weryfikacji (AI vs nazwa pliku i raport), tryby sesji |
+| `name_facts.py` | jednoznaczne dane z nazwy pliku (data, rok, numer), nazwy miesięcy |
+| `usage.py` | własne liczniki limitów: zapytania i tokeny na minutę i na dzień |
 | `collection_map.py` | pasek stanu kolekcji |
 | `filename_patterns.py` | wzorce nazw plików wejściowych |
-| `collection_checks.py` | kolekcje: jedno wydanie = jedna data, chronologia `lp` |
 | `rename_ops.py` | zmiana nazw z logiem i cofaniem |
 | `updater.py` | aktualizacje z ZIP-a i z GitHuba, kopie zapasowe, cofanie |
 | `cache_db.py` | cache SQLite po odcisku pliku (tylko wynik danego pliku, nie cała paczka) |
@@ -399,13 +400,15 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 
 ## Zalecana kolejność przy dużej partii
 
-1. Puść 20–30 plików, obejrzyj wyniki i porównaj z miniaturami.
-2. Dopiero potem ruszaj z całością.
-3. Jeśli masz raporty z innego programu — *Plik → Importuj raporty CSV…*.
-4. *Dopracuj niepewne* — kalendarz wydań i drugi odczyt AI zazielenią większość.
-5. *Weryfikuj* — resztę przejdź ręcznie (Enter, P).
+1. Nowa sesja → tryb (i strona dla AI w kolekcji wydań).
+2. Puść 20–30 plików, obejrzyj wyniki i porównaj z miniaturami.
+3. Dopiero potem ruszaj z całością — podpowiedź przed startem pokaże, czy wystarczy limitu.
+4. Jeśli masz raporty z innego programu — *Plik → Importuj raporty CSV…* (do porównania).
+5. *Weryfikuj* — żółte rekordy przejdź ręcznie (Enter, P). Trudne można najpierw
+   *Ponowić odczytem AI* z obrazem dokładnym albo innym modelem.
 6. Eksportuj do Excela jako kopię bezpieczeństwa.
-7. Filtr „pewne” → *Zaznacz widoczne* → *Zmień nazwy*.
+7. *Zmień nazwy* → zakres „tylko pewne”.
 
 Gotyckie winiety (starszy Kicker) i mocno stylizowane liternictwo wychodzą gorzej —
 takie wiersze warto ponowić na innym modelu.
+

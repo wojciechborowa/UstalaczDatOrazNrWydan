@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Czytnik wydan AI"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.1.0"
 
 LEGACY_APP_DIR = Path.home() / ".gazeta_ai"
 
@@ -47,7 +47,6 @@ BATCH_SIZE = 5                 # ile skanow w jednym zapytaniu
 RENDER_DPI = 180               # rasteryzacja pierwszej strony PDF
 MAX_IMAGE_DIM = 1600           # dluzszy bok wysylanego obrazu (px)
 JPEG_QUALITY = 85
-VERIFY_CONFIDENCE = 0.8        # ponizej tej pewnosci rekord trafia do weryfikacji
 VERIFY_DPI = 150               # rozdzielczosc podgladu w oknie weryfikacji
 MAX_RETRIES = 5
 REQUEST_TIMEOUT = 180
@@ -90,8 +89,11 @@ EXPORT_COLUMNS = [
     ("page_number", "Nr strony"),
     ("is_cover", "Strona tytulowa"),
     ("confidence", "Pewnosc"),
+    ("ai_date", "Data wg AI"),
+    ("ai_issue", "Nr wg AI"),
     ("new_name", "Nowa nazwa"),
     ("status", "Status"),
+    ("issues", "Powod weryfikacji"),
     ("note", "Uwagi"),
     ("model", "Model"),
     ("raw", "Surowa odpowiedz"),

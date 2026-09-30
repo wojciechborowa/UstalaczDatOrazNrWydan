@@ -12,6 +12,7 @@ Numer strony:  dopelniony zerami do 3 cyfr.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import re
 import unicodedata
 from pathlib import Path
@@ -94,7 +95,13 @@ def is_valid_date(date_iso: str | None) -> bool:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(date_iso).strip()):
         return False
     y, m, d = (int(x) for x in str(date_iso).split("-"))
-    return 1800 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31
+    if not 1800 <= y <= 2100:
+        return False
+    try:
+        _dt.date(y, m, d)      # 31 kwietnia albo 29 lutego w zwyklym roku - nie istnieje
+    except ValueError:
+        return False
+    return True
 
 
 UNKNOWN_TITLE = "Nieznany tytul"

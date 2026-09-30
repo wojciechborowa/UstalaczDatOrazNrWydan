@@ -1,7 +1,8 @@
 """Import raportow CSV z programu "gazety" (raport_dat.csv i podobne).
 
-Raport zawiera ustalone tam daty i numery wydan. Rekordy naszej sesji dopasowujemy
-do wierszy raportu po kolei:
+Raport zawiera ustalone tam daty i numery wydan. To dane wejsciowe do porownania
+z odczytem AI - tak jak nazwa pliku: zgodne = zielony, niezgodne = do weryfikacji.
+Rekordy naszej sesji dopasowujemy do wierszy raportu po kolei:
   1. skrot pliku (kolumna `skrot`, format "h2:<md5>") - dziala mimo zmiany nazwy
      i przeniesienia pliku,
   2. pelna sciezka,
@@ -153,53 +154,33 @@ class Index:
         return [e for e in cands if _size_ok(rec.get("size"), e["size_mb"])]
 
 
-def _key(e: dict) -> tuple:
-    return (e["date_iso"], e["issue_number"], e["issue_suffix"])
-
-
 def apply(rec: dict, matches: list[dict]) -> str:
-    """Przenosi wiedze z raportu do rekordu. Zwraca: 'pewne', 'watpliwe',
-    'sprzeczne', 'reczny' (rekord poprawiony recznie - nie ruszamy) albo ''."""
+    """Zapisuje dane z raportu przy rekordzie - jako dane wejsciowe do porownania
+    z odczytem AI (tak jak nazwa pliku). Pol rekordu nie zmienia: kolor zalezy tylko
+    od odpowiedzi AI. Zwraca 'znaleziony', 'reczny' (rekord poprawiony recznie) albo ''."""
     if not matches:
         return ""
-    st = (rec.get("status") or "").lower()
-    if "recznie" in st:
+    if "recznie" in (rec.get("status") or "").lower():
         return "reczny"
-    sure = [e for e in matches if e["sure"]]
-    srcs = ", ".join(sorted({e["src"] for e in matches}))
-    variants = {_key(e) for e in sure}
-    if len(variants) > 1:
-        opis = " / ".join(f"{d} nr {n or '?'}" for d, n, _ in sorted(variants, key=str))
-        rec["report_flag"] = True
-        rec["note"] = f"raporty sie roznia: {opis} ({srcs})"
-        rec["status"] = "raport: sprzecznosc"
-        return "sprzeczne"
-    best = sure[0] if sure else matches[-1]
-    if sure:
-        rec["date_iso"] = best["date_iso"]
-        rec["issue_number"] = best["issue_number"] or rec.get("issue_number")
-        rec["issue_suffix"] = best["issue_suffix"]
-        rec["title"] = rec.get("title") or best["title"]
-        rec["confidence"] = 1.0
-        rec["status"] = "z raportu"
-        rec["note"] = f"raport: {srcs}"
-        rec["outlier"] = False
-        rec["outlier_info"] = ""
-        rec["report_flag"] = False
-        rec["checked"] = False  # nie wysylamy juz do AI
-        return "pewne"
-    # watpliwe / brak - tylko podpowiedz, dane wpisujemy gdy rekord ich nie ma
-    if best["date_iso"] and not rec.get("date_iso"):
-        rec["date_iso"] = best["date_iso"]
-    if best["issue_number"] and not rec.get("issue_number"):
-        rec["issue_number"] = best["issue_number"]
-        rec["issue_suffix"] = best["issue_suffix"]
-    rec["title"] = rec.get("title") or best["title"]
-    hint = f"raport ({best['status'] or 'brak'}): {best['date_text'] or '?'} nr {best['issue_number'] or '?'}"
-    if best["note"]:
-        hint += f" - {best['note']}"
-    rec["note"] = hint
-    rec["report_flag"] = True
-    if st in ("nowy", ""):
-        rec["status"] = "raport: watpliwe"
-    return "watpliwe"
+    seen, data = set(), []
+    for e in matches:
+        if not e["date_iso"] and not e["issue_number"]:
+            continue
+        key = (e["date_iso"], e["issue_number"], e["issue_suffix"], e["src"])
+        if key in seen:
+            continue
+        seen.add(key)
+        data.append({"date_iso": e["date_iso"], "issue_number": e["issue_number"],
+                     "issue_suffix": e["issue_suffix"], "src": e["src"],
+                     "status": e["status"], "note": e["note"]})
+    rec["report_data"] = data or None
+    return "znaleziony" if data else ""
+
+
+def describe(rec: dict) -> str:
+    """Krotki opis danych z raportu do panelu szczegolow."""
+    out = []
+    for e in rec.get("report_data") or []:
+        out.append(f"{e.get('src')}: {e.get('date_iso') or '?'} nr {e.get('issue_number') or '?'}"
+                   + (f" ({e['status']})" if e.get("status") else ""))
+    return " | ".join(out)

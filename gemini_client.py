@@ -115,6 +115,10 @@ class GeminiClient(BaseClient):
             raise ValueError(f"odpowiedz bez tresci (powod: {cands[0].get('finishReason')})")
         return text
 
+    def _tokens(self, body: dict) -> int | None:
+        meta = body.get("usageMetadata") or {}
+        return meta.get("totalTokenCount") or meta.get("promptTokenCount")
+
     # ------------------------------------------------------------------ bledy
     @staticmethod
     def _error(r: requests.Response) -> dict:

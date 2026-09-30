@@ -88,6 +88,9 @@ class OpenRouterClient(BaseClient):
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         return text
 
+    def _tokens(self, body: dict) -> int | None:
+        return (body.get("usage") or {}).get("total_tokens")
+
     def _fatal_for(self, r: requests.Response) -> str | None:
         if r.status_code == 402:
             return ("402 - brak srodkow lub przekroczony limit kredytow na kluczu. "

@@ -121,14 +121,25 @@ DETAIL_DPI = 240
 DETAIL_TOP = 0.35      # jaka czesc strony (od gory) powiekszamy w trybie dokladnym
 
 
-def detail_image(path: str | Path, width: int = 1600) -> Image.Image:
+def load_page_for_ai(path: str | Path, page: int = 0, dpi: int = RENDER_DPI) -> Image.Image:
+    """Strona wysylana do AI. Obraz ma zawsze jedna strone; PDF bez tej strony = blad
+    z czytelnym komunikatem (bez cichego brania innej strony)."""
+    if kind_of(path) == "pdf" and page > 0:
+        n = page_count(path)
+        if page >= n:
+            raise RuntimeError(f"PDF ma {n} str., a w ustawieniach sesji wybrano strone {page + 1}")
+        return load_page(path, page, dpi=dpi)
+    return load_page(path, 0, dpi=dpi)
+
+
+def detail_image(path: str | Path, width: int = 1600, page: int = 0) -> Image.Image:
     """Obraz do dokladnego odczytu: powiekszony gorny pas strony (winieta z data
     i numerem), pod nim cala strona. Model widzi szczegoly i kontekst naraz."""
-    page = load_first_page(path, dpi=DETAIL_DPI)
-    w, h = page.size
-    top = page.crop((0, 0, w, max(1, int(h * DETAIL_TOP))))
+    img = load_page_for_ai(path, page, dpi=DETAIL_DPI)
+    w, h = img.size
+    top = img.crop((0, 0, w, max(1, int(h * DETAIL_TOP))))
     top = top.resize((width, max(1, int(top.size[1] * width / w))), Image.LANCZOS)
-    full = _fit(page, max(width, 1400))
+    full = _fit(img, max(width, 1400))
     if full.size[0] > width:
         full = full.resize((width, int(full.size[1] * width / full.size[0])), Image.LANCZOS)
     gap = 12
@@ -140,9 +151,9 @@ def detail_image(path: str | Path, width: int = 1600) -> Image.Image:
 
 def to_jpeg_b64(path: str | Path, ident: str | None = None,
                 max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDER_DPI,
-                detail: bool = False) -> str:
-    """Pierwsza strona jako JPEG w base64, opcjonalnie z paskiem identyfikatora."""
-    img = detail_image(path) if detail else _fit(load_first_page(path, dpi=dpi), max_dim)
+                detail: bool = False, page: int = 0) -> str:
+    """Strona (domyslnie pierwsza) jako JPEG w base64, opcjonalnie z paskiem identyfikatora."""
+    img = detail_image(path, page=page) if detail else _fit(load_page_for_ai(path, page, dpi=dpi), max_dim)
     if ident:
         img = stamp_id(img, ident)
     buf = io.BytesIO()
@@ -155,12 +166,16 @@ def to_data_url(path: str | Path, max_dim: int = MAX_IMAGE_DIM, dpi: int = RENDE
     return "data:image/jpeg;base64," + to_jpeg_b64(path, None, max_dim, dpi)
 
 
-def thumbnail(path: str | Path, width: int = 300, top_fraction: float = 0.45) -> Image.Image:
+def thumbnail(path: str | Path, width: int = 300, top_fraction: float = 0.45,
+              page: int = 0) -> Image.Image:
     """Gorny pasek strony - tam siedzi winieta z data i numerem.
 
     Pozwala zweryfikowac wynik wzrokiem bez otwierania pliku.
     """
-    img = load_first_page(path, dpi=90)
+    try:
+        img = load_page_for_ai(path, page, dpi=90)
+    except RuntimeError:
+        img = load_first_page(path, dpi=90)
     w, h = img.size
     img = img.crop((0, 0, w, max(1, int(h * top_fraction))))
     scale = width / float(img.size[0])

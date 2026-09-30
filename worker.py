@@ -7,81 +7,44 @@ import time
 
 import cache_db
 import render
+import assess
 from config import BATCH_SIZE
 from ai_base import BaseClient, FatalApiError
+from usage import DailyLimitReached
 
-FIELDS = ("title", "language", "date_iso", "date_raw", "month_raw", "year_printed",
-          "issue_number", "issue_suffix", "page_number", "is_cover", "confidence")
-
-
-def _apply(rec: dict, item: dict, model: str, raw: str) -> None:
-    """Wynik AI -> rekord. Dane z nazwy pliku (tytul, numer, strona, rok) maja pierwszenstwo."""
-    nd = rec.get("name_data") or {}
-    rec["title"] = nd.get("title") or item.get("publication_title")
-    rec["language"] = item.get("language")
-    rec["date_iso"] = item.get("date_iso")
-    rec["date_raw"] = item.get("date_raw")
-    rec["month_raw"] = item.get("month_raw")
-    rec["year_printed"] = item.get("year_printed")
-    if nd.get("issue"):
-        rec["issue_number"], rec["issue_suffix"] = nd["issue"], nd.get("suffix")
-    else:
-        rec["issue_number"] = item.get("issue_number")
-        rec["issue_suffix"] = item.get("issue_suffix")
-    rec["page_number"] = nd.get("page") or item.get("page_number")
-    rec["is_cover"] = item.get("is_cover")
-    try:
-        rec["confidence"] = round(float(item.get("confidence")), 2)
-    except Exception:
-        rec["confidence"] = None
+def _apply(rec: dict, item: dict, model: str, raw: str, mode: str) -> None:
+    """Wynik AI -> rekord. Odpowiedz modelu zostaje w rec['ai'], a pola rekordu
+    ustala assess.evaluate (porownanie z nazwa pliku i raportem)."""
+    item = {k: v for k, v in item.items() if k != "id"}
+    rec["ai"] = item
     rec["model"] = model
     rec["raw"] = raw
-    for flag in ("year_mismatch", "name_unconfirmed", "vote_conflict"):
-        rec[flag] = False
-
-    alts = [a for a in (item.get("date_alternatives") or []) if a]
-    notes = []
-    missing = []
-    if not rec.get("date_iso"):
-        missing.append("data")
-    if not rec.get("issue_number") and not nd.get("keep_name"):
-        missing.append("nr wydania")
-    if missing:
-        notes.append("nie odczytano: " + ", ".join(missing))
-    if len(alts) > 1:
-        # data niejednoznaczna albo dwie rozne daty na skanie - do sprawdzenia recznego
-        notes.insert(0, "data niejednoznaczna: " + " | ".join(alts))
-        if rec["confidence"] is not None:
-            rec["confidence"] = min(rec["confidence"], 0.5)
-    year = nd.get("year")
-    if year and rec.get("date_iso") and not str(rec["date_iso"]).startswith(str(year)):
-        rec["year_mismatch"] = True
-        notes.append(f"rok na skanie ({rec['date_iso'][:4]}) inny niz w nazwie pliku ({year})")
-    rec["status"] = "brak danych" if missing else "odczytano"
-
-    # data zapisana w nazwie pliku (np. przez inny program) - AI ma ja potwierdzic
-    name_date = rec.get("name_date")
-    if name_date:
-        if rec.get("date_iso") == name_date:
-            rec["status"] = "potwierdzone"
-            rec["confidence"] = max(rec["confidence"] or 0.0, 0.95)
-            notes.insert(0, "data z nazwy potwierdzona odczytem AI")
-        elif rec.get("date_iso"):
-            rec["vote_conflict"] = True
-            notes.insert(0, f"w nazwie pliku {name_date}, AI odczytalo {rec['date_iso']}")
-        else:
-            rec["date_iso"] = name_date
-            rec["name_unconfirmed"] = True
-            rec["status"] = "odczytano"
-            notes.insert(0, "AI nie odczytalo daty - zostaje data z nazwy (niepotwierdzona)")
-    rec["note"] = "; ".join(notes)
+    rec["status"] = assess.STATUS_OK
+    assess.evaluate(rec, mode)
 
 
-def hints_for(rec: dict) -> dict | None:
-    """Co wiadomo z nazwy pliku - trafia do promptu (bez daty: odczyt ma byc niezalezny)."""
+def hints_for(rec: dict, mode: str) -> dict | None:
+    """Co wiadomo z nazwy pliku - trafia do promptu tylko w kolekcji stron (tam AI ustala
+    dzien i miesiac, a reszta jest w nazwie). W kolekcji wydan odczyt jest niezalezny,
+    zeby porownanie z nazwa pliku cos znaczylo."""
+    if mode != assess.MODE_PAGES:
+        return None
     nd = rec.get("name_data") or {}
     h = {k: nd.get(k) for k in ("title", "year", "issue", "suffix", "page", "ost") if nd.get(k)}
+    if not h.get("year"):
+        y = (rec.get("name_facts") or {}).get("year")
+        if y:
+            h["year"] = y
     return h or None
+
+
+MODE_NOTES = {
+    assess.MODE_PAGES: (
+        "Each image is a single page or a two-page spread (two facing pages scanned together) "
+        "from INSIDE an issue, only rarely the cover. The issue date is usually in the running "
+        "head along the top edge or in the footer of either page. Your main task is the DAY and "
+        "the MONTH of that date."),
+}
 
 
 class ReadWorker(threading.Thread):
@@ -90,7 +53,7 @@ class ReadWorker(threading.Thread):
     def __init__(self, records: list[dict], client: BaseClient, model: str, queue,
                  batch_size: int = BATCH_SIZE, use_cache: bool = True,
                  rules: str | None = None, notes: str | None = None,
-                 detail: bool = False):
+                 detail: bool = False, mode: str = assess.MODE_ISSUES, page: int = 0):
         super().__init__(daemon=True)
         self.records = records
         self.model = model
@@ -100,12 +63,24 @@ class ReadWorker(threading.Thread):
         self.client = client
         self.rules = rules
         self.detail = detail
+        self.mode = mode
+        # strona PDF-a wysylana do AI (od 0) - tylko w kolekcji wydan
+        self.page = max(0, int(page or 0)) if mode == assess.MODE_ISSUES else 0
+        extras = []
+        if MODE_NOTES.get(mode):
+            extras.append(MODE_NOTES[mode])
+        if self.page:
+            extras.append(f"Each image is page {self.page + 1} of its issue (chosen by the user "
+                          "because the date and issue number are printed there), so it is not "
+                          "necessarily the cover.")
         if detail:
-            extra = ("Each image shows, below the identifier strip, first an ENLARGED top part "
-                     "of the page (where the masthead with date and issue number usually is), "
-                     "then a grey line, then the WHOLE page. Both show the same single page.")
+            extras.append("Each image shows, below the identifier strip, first an ENLARGED top part "
+                          "of the page (where the masthead with date and issue number usually is), "
+                          "then a grey line, then the WHOLE page. Both show the same single page.")
+        for extra in extras:
             notes = (notes + "\n" + extra) if notes else extra
         self.notes = notes
+        self.daily_limit = False
         self._seq = 0
 
         self._stop_evt = threading.Event()
@@ -151,17 +126,24 @@ class ReadWorker(threading.Thread):
         self._seq += 1
         ident = f"{self._seq:05d}"
         rec["_ident"] = ident
-        return ident, render.to_jpeg_b64(rec["path"], ident, detail=self.detail)
+        return ident, render.to_jpeg_b64(rec["path"], ident, detail=self.detail, page=self.page)
 
     def _ask(self, images, recs, on_wait=None):
-        hints = {r["_ident"]: h for r in recs for h in [hints_for(r)] if h}
-        return self.client.read_batch(images, self.model, self.rules, self.notes,
-                                      should_stop=self.should_stop, on_wait=on_wait,
-                                      hints=hints or None)
+        hints = {r["_ident"]: h for r in recs for h in [hints_for(r, self.mode)] if h}
+        return self.client.read_batch(
+            images, self.model, self.rules, self.notes,
+            should_stop=self.should_stop, on_wait=on_wait, hints=hints or None,
+            on_throttle=lambda d: self.emit("throttle", {"delay": d}))
 
     def _cache_key(self, rec: dict) -> str:
-        # odczyt z danymi z nazwy pliku to inne pytanie niz odczyt "na slepo"
-        return self.model + ("|nazwa" if hints_for(rec) else "")
+        # odczyt z danymi z nazwy pliku to inne pytanie niz odczyt "na slepo",
+        # a inna strona PDF-a to inny obraz
+        key = self.model + ("|nazwa" if hints_for(rec, self.mode) else "")
+        if self.mode == assess.MODE_PAGES:
+            key += "|strony"
+        if self.page and rec.get("kind") == "pdf":
+            key += f"|s{self.page + 1}"
+        return key
 
     def _store(self, rec: dict, item: dict) -> str:
         """Zapis do cache - tylko wynik tego pliku, bez surowej odpowiedzi calej paczki."""
@@ -195,8 +177,8 @@ class ReadWorker(threading.Thread):
                     hit = None
                 if hit:
                     hit.pop("_raw", None)   # starsze wpisy trzymaly cala odpowiedz paczki
-                    _apply(rec, hit, self.model, json.dumps(hit, ensure_ascii=False, indent=1))
-                    rec["status"] = rec["status"] + " (cache)"
+                    _apply(rec, hit, self.model, json.dumps(hit, ensure_ascii=False, indent=1), self.mode)
+                    rec["from_cache"] = True
                     from_cache += 1
                     self.emit("record", {"rec": rec})
                     continue
@@ -239,6 +221,10 @@ class ReadWorker(threading.Thread):
             except FatalApiError as exc:
                 self.emit("fatal", {"error": str(exc)})
                 break
+            except DailyLimitReached as exc:
+                self.daily_limit = True
+                self.emit("daily_limit", {"error": str(exc)})
+                break
             except Exception as exc:
                 # caly batch idzie do ponowienia pojedynczo - najczestsza przyczyna
                 # bledu to przesuniecie odpowiedzi w duzej paczce
@@ -249,9 +235,15 @@ class ReadWorker(threading.Thread):
                         break
                     try:
                         one, _raw1 = self._ask([self._image(rec)], [rec])
-                        _apply(rec, one[0], self.model, self._store(rec, one[0]))
+                        _apply(rec, one[0], self.model, self._store(rec, one[0]), self.mode)
+                        rec["from_cache"] = False
                     except FatalApiError as exc2:
                         self.emit("fatal", {"error": str(exc2)})
+                        self._stop_evt.set()
+                        break
+                    except DailyLimitReached as exc2:
+                        self.daily_limit = True
+                        self.emit("daily_limit", {"error": str(exc2)})
                         self._stop_evt.set()
                         break
                     except Exception as exc2:
@@ -265,14 +257,16 @@ class ReadWorker(threading.Thread):
                 continue
 
             for rec, item in zip(ok_batch, items):
-                _apply(rec, item, self.model, self._store(rec, item))
+                _apply(rec, item, self.model, self._store(rec, item), self.mode)
+                rec["from_cache"] = False
                 done_files += 1
                 self.emit("record", {"rec": rec})
 
             self.emit("progress", {"done": done_files, "total": total,
                                    "elapsed": self.elapsed()})
 
-        self.emit("finished", {"stopped": self._stop_evt.is_set(),
+        self.emit("finished", {"stopped": self._stop_evt.is_set() or self.daily_limit,
+                               "daily_limit": self.daily_limit,
                                "done": done_files, "total": total,
                                "from_cache": from_cache,
                                "elapsed": self.elapsed()})

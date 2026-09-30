@@ -15,25 +15,25 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+import assess
 import cache_db
-import calendar_model
-import collection_checks
 import filename_patterns
 from collection_map import CollectionMap
 import export
+import name_facts
 import naming
-import refine
 import rename_ops
 import updater
 import report_import
 import render
 import session as session_io
-import validate
+import usage
 from verify import VerifyDialog, check_reasons, needs_check, open_external, status_group
 from config import (ALL_EXT, APP_DIR, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_DB, COLUMN_MAX, COLUMNS,
                     CONFIG_FILE,
-                    FREE_RPM, PROVIDERS, SESSION_EXT, VERIFY_CONFIDENCE,
+                    FREE_RPM, PROVIDERS, SESSION_EXT,
                     load_config, save_config)
+from assess import MODE_ISSUES, MODE_PAGES, MODES
 from gemini_client import FALLBACK_MODELS, GeminiClient
 from openrouter_client import FatalApiError, OpenRouterClient
 from prompt import DEFAULT_RULES
@@ -63,10 +63,35 @@ def make_record(path: Path) -> dict:
         "month_raw": None, "year_printed": None, "issue_number": None,
         "issue_suffix": None, "page_number": None, "is_cover": None,
         "confidence": None, "new_name": "", "status": "nowy", "note": "",
-        "raw": "", "model": None, "outlier": False, "outlier_info": "",
-        "h2": None, "size": None, "report_flag": False,
-        "name_data": None, "pattern": "", "name_date": None, "name_complete": False,
+        "raw": "", "model": None, "h2": None, "size": None,
+        "name_data": None, "pattern": "", "name_complete": False, "name_facts": None,
+        "ai": None, "ai_date": None, "ai_issue": None, "issues": None, "report_data": None,
     }
+
+
+def parse_conf_filter(text: str):
+    """Filtr pewnosci: '<0.8', '<=0.5', '>0.9', '0.5-0.8', 'brak'. Zwraca funkcje
+    (pewnosc -> bool) albo None, gdy filtr jest pusty / 'dowolna'. Rzuca ValueError."""
+    t = (text or "").strip().lower().replace(",", ".").replace(" ", "")
+    if t in ("", "dowolna", "wszystkie"):
+        return None
+    if t == "brak":
+        return lambda c: c is None
+    m = re.fullmatch(r"(<=|>=|<|>|=)?(\d*\.?\d+)", t)
+    if m:
+        op, v = m.group(1) or "=", float(m.group(2))
+        ops = {"<": lambda c: c < v, "<=": lambda c: c <= v, ">": lambda c: c > v,
+               ">=": lambda c: c >= v, "=": lambda c: abs(c - v) < 0.005}
+        f = ops[op]
+        return lambda c: c is not None and f(c)
+    m = re.fullmatch(r"(\d*\.?\d+)-(\d*\.?\d+)", t)
+    if m:
+        lo, hi = sorted((float(m.group(1)), float(m.group(2))))
+        return lambda c: c is not None and lo <= c <= hi
+    raise ValueError("nie rozumiem filtru pewnosci - wpisz np. <0.8, >=0.9, 0.5-0.8 albo brak")
+
+
+CONF_PRESETS = ["dowolna", "<0.5", "<0.7", "<0.8", "<0.9", ">=0.9", "0.5-0.8", "brak"]
 
 
 class App(tk.Tk):
@@ -90,7 +115,9 @@ class App(tk.Tk):
         self._busy = False
         self.report_index = report_import.Index()
         self.session_patterns: list[dict] = []   # wlasne wzorce nazw tej sesji
-        self.var_chrono = tk.StringVar(value="warn")  # chronologia lp: off / warn / on
+        self.mode: str | None = None             # tryb sesji: kolekcja wydan / kolekcja stron
+        self.page_index = 0                      # strona PDF-a wysylana do AI (od 0)
+        self.usage = usage.Usage()               # liczniki zapytan liczone przez program
         self._importing = False
 
         prov = self.cfg.get("provider", "openrouter")
@@ -103,10 +130,13 @@ class App(tk.Tk):
         self.var_model = tk.StringVar(value=self.cfg.get(k_model, ""))
         self.var_batch = tk.IntVar(value=int(self.cfg.get("batch_size", BATCH_SIZE)))
         self.var_rpm = tk.IntVar(value=int(self.cfg.get(k_rpm, d_rpm)))
+        self.var_tpm = tk.IntVar(value=0)
+        self.var_rpd = tk.IntVar(value=0)
         self.var_cache = tk.BooleanVar(value=bool(self.cfg.get("use_cache", True)))
         self.var_only_free = tk.BooleanVar(value=bool(self.cfg.get("only_free", True)))
         self.var_title_override = tk.StringVar(value="")
         self.var_filter = tk.StringVar(value="wszystkie")
+        self.var_conf = tk.StringVar(value="dowolna")
         self.var_search = tk.StringVar(value="")
         self.var_showkey = tk.BooleanVar(value=False)
 
@@ -114,8 +144,11 @@ class App(tk.Tk):
         self._build_ui()
         self._bind_keys()
 
+        self._load_limits()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(120, self.poll_queue)
+        self.after(1000, self._usage_tick)
+        self._update_mode_label()
         self.set_status("Gotowy. Wklej klucz API w zakladce 'API i model', potem dodaj pliki.")
 
     # =============================================================== budowa UI
@@ -132,6 +165,7 @@ class App(tk.Tk):
         f.add_command(label="Zapisz sesje", accelerator="Ctrl+S", command=self.save_session)
         f.add_command(label="Zapisz sesje jako...", accelerator="Ctrl+Shift+S",
                       command=self.save_session_as)
+        f.add_command(label="Ustawienia sesji (tryb, strona dla AI)...", command=self.session_settings)
         f.add_separator()
         f.add_command(label="Importuj raporty CSV...", command=self.import_reports)
         f.add_separator()
@@ -153,25 +187,19 @@ class App(tk.Tk):
         m.add_cascade(label="Pliki", menu=p)
 
         t = tk.Menu(m, tearoff=0)
-        t.add_command(label="Sprawdz spojnosc numer-data", command=self.run_cross_check)
-        t.add_command(label="Uzupelnij brakujace lata", command=self.run_fill_years)
-        t.add_command(label="Sprawdz z kalendarzem wydan", command=lambda: self.apply_calendar(True))
-        ch = tk.Menu(t, tearoff=0)
-        for mode, label in collection_checks.CHRONO_MODES.items():
-            ch.add_radiobutton(label=label, value=mode, variable=self.var_chrono,
-                               command=self._chrono_changed)
-        t.add_cascade(label="Chronologia lp (ta sesja)", menu=ch)
-        t.add_command(label="Dopracuj niepewne...", command=self.open_refine)
-        t.add_command(label="Ponow odczyt podswietlonych (dokladniej)...",
-                      command=lambda: self.open_refine(selected=True))
+        t.add_command(label="Ponow odczyt AI podswietlonych (bez cache)",
+                      command=lambda: self.reread_selected(False))
+        t.add_command(label="Ponow odczyt AI podswietlonych - obraz dokladny",
+                      command=lambda: self.reread_selected(True))
         t.add_separator()
         t.add_command(label="Przelicz nowe nazwy", command=self.recompute_all_names)
         t.add_command(label="Edytuj rekord...", command=self.edit_selected)
         t.add_command(label="Otworz plik", accelerator="P", command=self.open_selected_files)
-        t.add_command(label="Weryfikuj niepewne...", accelerator="Ctrl+W", command=self.open_verify)
+        t.add_command(label="Weryfikuj...", accelerator="Ctrl+W", command=self.open_verify)
         t.add_separator()
         t.add_command(label="Cofnij zmiane nazw...", command=self.undo_rename)
         t.add_command(label="Cache odczytow: rozmiar i czyszczenie...", command=self.clear_cache)
+        t.add_command(label="Zuzycie limitow AI (liczniki programu)", command=self.show_usage)
         t.add_command(label="Statystyki", command=self.show_stats)
         m.add_cascade(label="Narzedzia", menu=t)
 
@@ -226,18 +254,32 @@ class App(tk.Tk):
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(top, text="Filtr:").pack(side="left")
-        cb = ttk.Combobox(top, textvariable=self.var_filter, width=16, state="readonly",
-                          values=["wszystkie", "do sprawdzenia", "pewne", "zaznaczone", "nowe", "odczytane",
-                                  "brak danych", "bledy", "podejrzane", "bez nowej nazwy",
-                                  "luzne (bez wzorca)"])
+        cb = ttk.Combobox(top, textvariable=self.var_filter, width=18, state="readonly",
+                          values=["wszystkie", "do weryfikacji", "zielone (pewne)", "zaznaczone", "nowe",
+                                  "bledy", "niezgodne z nazwa/raportem", "niekompletny odczyt",
+                                  "bez nowej nazwy", "luzne (bez wzorca)", "z raportem"])
         cb.pack(side="left", padx=3)
         cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_tree())
+        ttk.Label(top, text="Pewnosc:").pack(side="left", padx=(8, 2))
+        cc = ttk.Combobox(top, textvariable=self.var_conf, width=9, values=CONF_PRESETS)
+        cc.pack(side="left")
+        cc.bind("<<ComboboxSelected>>", lambda e: self.refresh_tree())
+        cc.bind("<Return>", lambda e: self.refresh_tree())
         ttk.Label(top, text="Szukaj:").pack(side="left", padx=(8, 2))
         e = ttk.Entry(top, textvariable=self.var_search, width=18)
         e.pack(side="left")
         e.bind("<Return>", lambda ev: self.refresh_tree())
         ttk.Button(top, text="Filtruj", command=self.refresh_tree).pack(side="left", padx=3)
 
+
+        # ---- tryb sesji
+        mrow = ttk.Frame(self.tab_main)
+        mrow.pack(fill="x", padx=4, pady=(0, 2))
+        self.lbl_mode = ttk.Label(mrow, text="", font=("TkDefaultFont", 9, "bold"), foreground="#00509e")
+        self.lbl_mode.pack(side="left")
+        ttk.Button(mrow, text="Ustawienia sesji...", command=self.session_settings).pack(side="left", padx=8)
+        self.lbl_usage_main = ttk.Label(mrow, text="", foreground="#555")
+        self.lbl_usage_main.pack(side="right")
 
         # ---- pasek stanu kolekcji
         self.cmap = CollectionMap(self.tab_main, self.jump_to_record)
@@ -272,13 +314,12 @@ class App(tk.Tk):
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
 
-        # kolory grup: zielony = pewne, pomaranczowy = do sprawdzenia, czerwony = blad
+        # kolory grup: zielony = pewne, pomaranczowy = do weryfikacji, czerwony = blad
         self.tree.tag_configure("certain", foreground="#0a6b2e")
         self.tree.tag_configure("check", foreground="#b36b00")
         self.tree.tag_configure("error", foreground="#b00020")
         self.tree.tag_configure("renamed", foreground="#00509e")
         self.tree.tag_configure("new", foreground="#555555")
-        self.tree.tag_configure("outlier", background="#ffe9c7")
 
         self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
@@ -291,6 +332,11 @@ class App(tk.Tk):
         self.tree_menu.add_command(label="Otworz plik  [P]", command=self.open_selected_files)
         self.tree_menu.add_command(label="Edytuj rekord...", command=self.edit_selected)
         self.tree_menu.add_command(label="Weryfikuj...", command=self.open_verify)
+        self.tree_menu.add_separator()
+        self.tree_menu.add_command(label="Ponow odczyt AI (bez cache)",
+                                   command=lambda: self.reread_selected(False))
+        self.tree_menu.add_command(label="Ponow odczyt AI - obraz dokladny",
+                                   command=lambda: self.reread_selected(True))
 
         right = ttk.Frame(paned)
         paned.add(right, weight=1)
@@ -315,16 +361,13 @@ class App(tk.Tk):
         self.btn_pause.pack(side="left", padx=3)
         self.btn_stop = ttk.Button(act, text="Stop", command=self.stop_read, state="disabled")
         self.btn_stop.pack(side="left")
-        self.btn_refine = ttk.Button(act, text="Dopracuj niepewne", command=self.open_refine)
-        self.btn_refine.pack(side="left", padx=(10, 0))
         self.btn_verify = ttk.Button(act, text="Weryfikuj (0)", command=self.open_verify)
-        self.btn_verify.pack(side="left", padx=(3, 0))
+        self.btn_verify.pack(side="left", padx=(10, 0))
 
         ttk.Separator(act, orient="vertical").pack(side="left", fill="y", padx=10)
         self.btn_rename = ttk.Button(act, text="Zmien nazwy", command=self.do_rename)
         self.btn_rename.pack(side="left")
         ttk.Button(act, text="Cofnij zmiane nazw", command=self.undo_rename).pack(side="left", padx=3)
-        ttk.Button(act, text="Sprawdz spojnosc", command=self.run_cross_check).pack(side="left", padx=(10, 0))
 
     # --------------------------------------------------------------- zakladka 2
     def _build_api_tab(self):
@@ -352,6 +395,18 @@ class App(tk.Tk):
                         command=self._toggle_key).pack(side="left")
         ttk.Button(row, text="Zapisz klucz", command=self.save_key).pack(side="left", padx=6)
         ttk.Button(row, text="Testuj klucz", command=self.test_key).pack(side="left")
+
+        rowk = ttk.Frame(box)
+        rowk.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(rowk, text="Zapisane klucze:").pack(side="left")
+        self.var_saved_key = tk.StringVar()
+        self.cb_keys = ttk.Combobox(rowk, textvariable=self.var_saved_key, width=40, state="readonly")
+        self.cb_keys.pack(side="left", padx=6)
+        self.cb_keys.bind("<<ComboboxSelected>>", lambda e: self.use_saved_key())
+        ttk.Button(rowk, text="Dodaj biezacy do listy...", command=self.add_saved_key).pack(side="left")
+        ttk.Button(rowk, text="Usun z listy", command=self.remove_saved_key).pack(side="left", padx=3)
+        ttk.Label(rowk, text="(np. klucz platny i darmowy - przelaczasz recznie)",
+                  foreground="#555").pack(side="left", padx=6)
 
         ttk.Label(box, text=f"Klucze sa zapisywane lokalnie w {CONFIG_FILE} "
                             "i NIE trafiaja do pliku sesji.",
@@ -397,10 +452,25 @@ class App(tk.Tk):
         r.pack(fill="x", padx=8, pady=6)
         ttk.Label(r, text="Skanow w jednym zapytaniu:").pack(side="left")
         ttk.Spinbox(r, from_=1, to=10, width=5, textvariable=self.var_batch).pack(side="left", padx=(4, 16))
-        ttk.Label(r, text="Limit zapytan/min:").pack(side="left")
-        ttk.Spinbox(r, from_=1, to=120, width=5, textvariable=self.var_rpm).pack(side="left", padx=(4, 16))
         ttk.Checkbutton(r, text="uzywaj cache (nie pyta ponownie o ten sam plik)",
                         variable=self.var_cache).pack(side="left")
+        rl = ttk.Frame(box3)
+        rl.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(rl, text="Limity wybranego modelu:  zapytan/min").pack(side="left")
+        ttk.Spinbox(rl, from_=1, to=2000, width=6, textvariable=self.var_rpm).pack(side="left", padx=(4, 10))
+        ttk.Label(rl, text="tokenow/min").pack(side="left")
+        ttk.Spinbox(rl, from_=0, to=100000000, increment=10000, width=10,
+                    textvariable=self.var_tpm).pack(side="left", padx=(4, 10))
+        ttk.Label(rl, text="zapytan/dzien").pack(side="left")
+        ttk.Spinbox(rl, from_=0, to=1000000, width=8, textvariable=self.var_rpd).pack(side="left", padx=(4, 10))
+        ttk.Button(rl, text="Domyslne dla modelu", command=self.default_limits).pack(side="left")
+        ttk.Label(box3, text="0 = bez limitu. Wartosci domyslne sa orientacyjne (darmowy plan) - aktualne "
+                             "limity Twojego klucza pokazuje AI Studio / OpenRouter. Program sam liczy "
+                             "wyslane zapytania i tokeny, zwalnia przed limitem na minute i zatrzymuje "
+                             "odczyt po wyczerpaniu limitu dziennego.",
+                  foreground="#555", wraplength=1100, justify="left").pack(anchor="w", padx=8)
+        self.lbl_usage = ttk.Label(box3, text="", foreground="#00509e")
+        self.lbl_usage.pack(anchor="w", padx=8, pady=(4, 2))
         ttk.Label(box3, text="Wiekszy batch = mniej zapytan = szybciej w ramach limitu. Kazdy skan "
                              "dostaje identyfikator na obrazie, wiec wyniki nie pomyla sie miedzy "
                              "plikami. Zalecane 5.",
@@ -512,6 +582,14 @@ class App(tk.Tk):
         if not new:
             messagebox.showinfo(APP_NAME, "Nie znaleziono nowych plikow do dodania.")
             return
+        if not self.mode:
+            imgs = sum(1 for p in new if render.kind_of(p) == "image")
+            choice = ModeDialog.ask(self, "Tryb sesji",
+                                    MODE_PAGES if imgs * 2 > len(new) else MODE_ISSUES, 0)
+            if choice is None:
+                return
+            self.mode, self.page_index = choice
+            self._update_mode_label()
         total = len(new)
         patterns = self.patterns()
         added = []
@@ -558,24 +636,34 @@ class App(tk.Tk):
     def _visible_records(self) -> list[dict]:
         f = self.var_filter.get()
         q = self.var_search.get().strip().lower()
+        try:
+            conf_ok = parse_conf_filter(self.var_conf.get())
+        except ValueError as exc:
+            self.set_status(str(exc))
+            conf_ok = None
         out = []
         for r in self.records:
             st = (r.get("status") or "").lower()
-            if f == "do sprawdzenia" and not needs_check(r):
+            issues = " ".join(r.get("issues") or [])
+            if conf_ok is not None and not conf_ok(r.get("confidence")):
                 continue
-            if f == "pewne" and status_group(r) not in ("certain", "renamed"):
+            if f == "do weryfikacji" and not needs_check(r):
+                continue
+            if f == "zielone (pewne)" and status_group(r) not in ("certain", "renamed"):
                 continue
             if f == "zaznaczone" and not r.get("checked"):
                 continue
             if f == "nowe" and st != "nowy":
                 continue
-            if f == "odczytane" and not st.startswith("odczytano"):
-                continue
-            if f == "brak danych" and not st.startswith("brak danych"):
-                continue
             if f == "bledy" and "blad" not in st:
                 continue
-            if f == "podejrzane" and not r.get("outlier"):
+            if f == "niezgodne z nazwa/raportem" and "a w nazwie pliku" not in issues \
+                    and "raport" not in issues:
+                continue
+            if f == "niekompletny odczyt" and not any(w in issues for w in ("nie odczytalo", "nie rozstrzygnelo",
+                                                                           "niejednoznaczna", "nie istnieje")):
+                continue
+            if f == "z raportem" and not r.get("report_data"):
                 continue
             if f == "bez nowej nazwy" and r.get("name_complete"):
                 continue
@@ -594,10 +682,10 @@ class App(tk.Tk):
         issue = naming.format_issue(r.get("issue_number"), r.get("issue_suffix"))
         conf = r.get("confidence")
         note = r.get("note") or ""
-        # powod "do sprawdzenia" zawsze widoczny w Uwagach
+        # powod weryfikacji zawsze widoczny w Uwagach
         extra = [x for x in check_reasons(r) if x not in note]
         if extra:
-            note = (note + " | " if note else "") + "DO SPRAWDZENIA: " + "; ".join(extra)
+            note = (note + " | " if note else "") + "DO WERYFIKACJI: " + "; ".join(extra)
         return (
             CHECK_ON if r.get("checked") else CHECK_OFF,
             r.get("old_name", ""),
@@ -613,10 +701,7 @@ class App(tk.Tk):
         )
 
     def _row_tags(self, r: dict) -> tuple:
-        tags = [status_group(r)]
-        if r.get("outlier") or r.get("cal_state") == "conflict" or r.get("vote_conflict"):
-            tags.append("outlier")
-        return tuple(tags)
+        return (status_group(r),)
 
     def refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
@@ -849,14 +934,14 @@ class App(tk.Tk):
             f"Nr strony:   {r.get('page_number')}",
             f"Okladka:     {r.get('is_cover')}",
             f"Pewnosc:     {r.get('confidence')}",
-            f"Kalendarz:   {r.get('cal_info') or '-'}",
+            f"Wg AI:       data {r.get('ai_date') or '-'}, nr {r.get('ai_issue') or '-'}",
+            f"Z nazwy:     {self._facts_text(r)}",
+            f"Z raportu:   {report_import.describe(r) or '-'}",
             f"Model:       {r.get('model')}",
             f"Status:      {r.get('status')}",
             f"Uwagi:       {r.get('note')}",
-            f"Do sprawdz.: {'; '.join(check_reasons(r)) or '-'}",
+            f"Do weryfik.: {'; '.join(check_reasons(r)) or '-'}",
         ]
-        if r.get("outlier"):
-            lines.append(f"PODEJRZANE:  {r.get('outlier_info')}")
         lines += ["", "--- surowa odpowiedz modelu ---", str(r.get("raw") or "")]
         self.txt_detail.insert("1.0", "\n".join(lines))
         self._load_thumb(r)
@@ -865,10 +950,11 @@ class App(tk.Tk):
         self._thumb_token += 1
         token = self._thumb_token
         path = r.get("path")
+        page = self.page_index if self.mode == MODE_ISSUES else 0
 
         def job():
             try:
-                img = render.thumbnail(path, width=300)
+                img = render.thumbnail(path, width=300, page=page)
             except Exception as exc:
                 self.queue.put(("thumb_err", {"token": token, "error": str(exc)}))
                 return
@@ -876,17 +962,150 @@ class App(tk.Tk):
 
         threading.Thread(target=job, daemon=True).start()
 
+    @staticmethod
+    def _facts_text(r: dict) -> str:
+        nf = r.get("name_facts") or {}
+        parts = []
+        if nf.get("year"):
+            parts.append(f"rok {nf['year']}")
+        if nf.get("month"):
+            parts.append(f"miesiac {int(nf['month']):02d}")
+        if nf.get("day"):
+            parts.append(f"dzien {int(nf['day']):02d}")
+        if nf.get("issue"):
+            parts.append(f"nr {nf['issue']}" + (f" {nf['suffix']}" if nf.get("suffix") else ""))
+        if not parts:
+            return "-"
+        return ", ".join(parts) + (" (wzorzec)" if nf.get("source") == "wzorzec" else " (nazwa luzna)")
+
     # =============================================================== API i model
     def _toggle_key(self):
         self.ent_key.config(show="" if self.var_showkey.get() else "*")
 
     def _client(self, key: str | None = None, model: str = ""):
-        """Klient wybranego dostawcy."""
+        """Klient wybranego dostawcy - z licznikami limitow programu."""
         key = self.var_key.get().strip() if key is None else key
-        rpm = max(1, int(self.var_rpm.get() or 1))
-        if self.var_provider.get() == "gemini":
-            return GeminiClient(key, model, rpm=rpm)
-        return OpenRouterClient(key, model, rpm=rpm)
+        limits = self._limits()
+        cls = GeminiClient if self.var_provider.get() == "gemini" else OpenRouterClient
+        return cls(key, model, rpm=max(1, limits["rpm"] or 60), usage=self.usage, limits=limits)
+
+    # ------------------------------------------------------------ limity modelu
+    def _limits_key(self, prov: str | None = None) -> str:
+        return f"{prov or self.var_provider.get()}|{self.var_model.get().strip()}"
+
+    def _limits(self) -> dict:
+        def num(var, default=0):
+            try:
+                return max(0, int(var.get()))
+            except (tk.TclError, ValueError):
+                return default
+        return {"rpm": num(self.var_rpm, 10), "tpm": num(self.var_tpm), "rpd": num(self.var_rpd)}
+
+    def _load_limits(self):
+        """Limity dla wybranego dostawcy i modelu: zapisane albo domyslne z tabeli."""
+        lim = (self.cfg.get("limits") or {}).get(self._limits_key())
+        if not lim:
+            lim = usage.default_limits(self.var_provider.get(), self.var_model.get())
+        self.var_rpm.set(int(lim.get("rpm") or 10))
+        self.var_tpm.set(int(lim.get("tpm") or 0))
+        self.var_rpd.set(int(lim.get("rpd") or 0))
+        self._refresh_usage()
+
+    def _store_limits(self, prov: str | None = None):
+        if self.var_model.get().strip():
+            self.cfg.setdefault("limits", {})[self._limits_key(prov)] = self._limits()
+
+    def default_limits(self):
+        lim = usage.default_limits(self.var_provider.get(), self.var_model.get())
+        self.var_rpm.set(lim["rpm"])
+        self.var_tpm.set(lim["tpm"])
+        self.var_rpd.set(lim["rpd"])
+        self.save_key()
+
+    def _usage_key(self) -> str:
+        return usage.Usage.key(self.var_provider.get(), self.var_model.get().strip(),
+                               self.var_key.get().strip())
+
+    def _refresh_usage(self):
+        if not hasattr(self, "lbl_usage"):
+            return
+        if not self.var_model.get().strip():
+            self.lbl_usage.config(text="Zuzycie: wybierz model.")
+            self.lbl_usage_main.config(text="")
+            return
+        txt = usage.describe(self.usage.snapshot(self._usage_key()), self._limits())
+        self.lbl_usage.config(text="Zuzycie (liczone przez program): " + txt)
+        self.lbl_usage_main.config(text=f"{self.var_model.get().strip()}: " + txt.split("  ·  limit")[0])
+
+    def _usage_tick(self):
+        try:
+            self._refresh_usage()
+        except Exception:
+            pass
+        self.after(2000 if self._busy else 10000, self._usage_tick)
+
+    def show_usage(self):
+        snap = self.usage.snapshot(self._usage_key())
+        lim = self._limits()
+        lines = [f"Dostawca: {PROVIDERS[self.var_provider.get()]}",
+                 f"Model: {self.var_model.get() or '-'}", "",
+                 usage.describe(snap, lim).replace("  ·  ", "\n"), "",
+                 f"Srednio tokenow na skan: {snap.get('tok_per_img') or '? (jeszcze nie zmierzono)'}",
+                 "", "Liczniki obejmuja tylko zapytania wyslane przez ten program z tym kluczem."]
+        n = sum(1 for r in self.records if r.get("checked"))
+        if n:
+            lines += ["", f"Dla {n} zaznaczonych plikow:"]
+            lines += usage.advice(snap, lim, n, max(1, int(self.var_batch.get() or 1)))
+        messagebox.showinfo(APP_NAME, "\n".join(lines))
+
+    # ----------------------------------------------------------- zapisane klucze
+    def _saved_keys(self) -> list[dict]:
+        return list(self.cfg.get(f"{self.var_provider.get()}_keys") or [])
+
+    def _refresh_saved_keys(self):
+        keys = self._saved_keys()
+        self.cb_keys.config(values=[f"{k['label']}  (...{k['key'][-4:]})" for k in keys])
+        cur = self.var_key.get().strip()
+        match = [i for i, k in enumerate(keys) if k["key"] == cur]
+        self.var_saved_key.set(self.cb_keys.cget("values")[match[0]] if match else "")
+
+    def use_saved_key(self):
+        i = self.cb_keys.current()
+        keys = self._saved_keys()
+        if 0 <= i < len(keys):
+            self.var_key.set(keys[i]["key"])
+            self.save_key()
+            self.lbl_key_info.config(text="")
+            self.log(f"Uzyty zapisany klucz: {keys[i]['label']}")
+
+    def add_saved_key(self):
+        from tkinter import simpledialog
+        key = self.var_key.get().strip()
+        if not key:
+            messagebox.showinfo(APP_NAME, "Najpierw wpisz klucz w polu 'Klucz'.")
+            return
+        keys = self._saved_keys()
+        if any(k["key"] == key for k in keys):
+            messagebox.showinfo(APP_NAME, "Ten klucz juz jest na liscie.")
+            return
+        label = simpledialog.askstring(APP_NAME, "Nazwa klucza (np. 'platny', 'darmowy'):",
+                                       parent=self)
+        if not label:
+            return
+        keys.append({"label": label.strip(), "key": key})
+        self.cfg[f"{self.var_provider.get()}_keys"] = keys
+        save_config(self.cfg)
+        self._refresh_saved_keys()
+
+    def remove_saved_key(self):
+        i = self.cb_keys.current()
+        keys = self._saved_keys()
+        if 0 <= i < len(keys) and messagebox.askyesno(APP_NAME, f"Usunac z listy klucz "
+                                                               f"'{keys[i]['label']}'?"):
+            del keys[i]
+            self.cfg[f"{self.var_provider.get()}_keys"] = keys
+            save_config(self.cfg)
+            self._refresh_saved_keys()
 
     def _store_provider_fields(self, prov: str):
         k_key, k_model, k_rpm, _ = PROVIDER_CFG[prov]
@@ -896,6 +1115,7 @@ class App(tk.Tk):
             self.cfg[k_rpm] = int(self.var_rpm.get())
         except (tk.TclError, ValueError):
             pass
+        self._store_limits(prov)
 
     def switch_provider(self):
         """Zmiana dostawcy: zapamietuje pola poprzedniego, wczytuje pola nowego."""
@@ -912,6 +1132,7 @@ class App(tk.Tk):
         save_config(self.cfg)
         self.tree_models.delete(*self.tree_models.get_children())
         self.lbl_key_info.config(text="")
+        self._load_limits()
         self._update_provider_ui()
         self.log(f"Dostawca AI: {PROVIDERS[new]}")
 
@@ -929,6 +1150,7 @@ class App(tk.Tk):
                 "Klucz: openrouter.ai/keys. Darmowo 50 zapytan/dzien, "
                 "po jednorazowym zakupie 10 kredytow 1000/dzien."))
             self.chk_only_free.state(["!disabled"])
+        self._refresh_saved_keys()
         custom = bool((self.cfg.get("prompt_rules") or "").strip())
         notes = bool((self.cfg.get("collection_notes") or "").strip())
         self.lbl_prompt.config(text=("wlasne zasady" if custom else "zasady domyslne") +
@@ -943,6 +1165,8 @@ class App(tk.Tk):
             "only_free": bool(self.var_only_free.get()),
         })
         save_config(self.cfg)
+        self._refresh_saved_keys()
+        self._refresh_usage()
         self.set_status("Ustawienia zapisane.")
         self.log("Zapisano ustawienia i klucz API lokalnie.")
 
@@ -962,7 +1186,8 @@ class App(tk.Tk):
             return
         if self.var_provider.get() == "gemini":
             txt = (f"Klucz dziala. Dostepnych modeli czytajacych obrazy: {info.get('models')}.\n"
-                   f"Gemini nie podaje limitow przez API - sprawdzisz je w AI Studio.")
+                   f"Gemini nie podaje limitow przez API - program liczy zuzycie sam "
+                   f"(ponizej, w 'Parametry przetwarzania'); faktyczne limity pokazuje AI Studio.")
         else:
             fm = info.get("free_model_daily_requests") or {}
             txt = (f"Klucz dziala. Etykieta: {info.get('label') or '-'}\n"
@@ -1011,7 +1236,9 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "Zaznacz model na liscie.")
             return
         model_id = self.tree_models.item(sel[0], "values")[0]
+        self._store_limits()
         self.var_model.set(model_id)
+        self._load_limits()
         self.save_key()
         self.log(f"Wybrano model: {model_id}")
 
@@ -1027,7 +1254,9 @@ class App(tk.Tk):
         self.log("Zapisano zasady odczytu i uwagi o kolekcji.")
 
     # =============================================================== odczyt AI
-    def start_read(self):
+    def start_read(self, records: list[dict] | None = None, use_cache: bool | None = None,
+                   detail: bool = False, confirm: bool = True):
+        """Odczyt AI zaznaczonych plikow (albo podanej listy - ponowny odczyt)."""
         if self.worker and self.worker.is_alive():
             messagebox.showinfo(APP_NAME, "Odczyt juz trwa.")
             return
@@ -1039,38 +1268,60 @@ class App(tk.Tk):
             messagebox.showwarning(APP_NAME, "Nie wybrano modelu (zakladka 'API i model').")
             self.nb.select(self.tab_api)
             return
+        if not self.ensure_mode():
+            return
 
-        todo = [r for r in self.records if r.get("checked")]
+        todo = records if records is not None else [r for r in self.records if r.get("checked")]
         if not todo:
             messagebox.showinfo(APP_NAME, "Nie zaznaczono zadnego pliku.")
             return
 
-        batch = max(1, int(self.var_batch.get()))
-        if self.var_provider.get() == "gemini":
-            limits = (f"Dostawca: Google Gemini, model {self.var_model.get()}\n"
-                      f"Darmowe limity zaleza od modelu - sprawdzisz je w AI Studio.")
-        else:
-            limits = ("Limit darmowy OpenRouter: 20/min oraz 50/dzien bez doladowania\n"
-                      "(1000/dzien po jednorazowym zakupie 10 kredytow).")
-        est_req = -(-len(todo) // batch)
-        if not messagebox.askyesno(
-                APP_NAME,
-                f"Plikow do odczytu: {len(todo)}\n"
-                f"Skanow w zapytaniu: {batch}\n"
-                f"Szacowana liczba zapytan: {est_req}\n\n"
-                f"{limits}\n\n"
-                f"Rozpoczac?"):
-            return
-
+        batch = 1 if detail else max(1, int(self.var_batch.get()))
         self.save_key()
+        if confirm:
+            what = ("dzien i miesiac (reszta z nazwy pliku)" if self.mode == MODE_PAGES
+                    else f"data i numer wydania ze strony {self.page_index + 1}")
+            snap = self.usage.snapshot(self._usage_key())
+            lines = [f"Tryb: {MODES[self.mode]} - AI ustala: {what}.",
+                     f"Dostawca: {PROVIDERS[self.var_provider.get()]}, model {self.var_model.get()}",
+                     f"Plikow do odczytu: {len(todo)}"
+                     + (" (czesc moze byc w cache)" if (self.var_cache.get() if use_cache is None
+                                                        else use_cache) else ""), ""]
+            lines += usage.advice(snap, self._limits(), len(todo), batch)
+            if not messagebox.askyesno(APP_NAME, "\n".join(lines) + "\n\nRozpoczac?"):
+                return
+
+        for r in todo:
+            r["_pending"] = True      # zdejmowane, gdy przyjdzie wynik tego pliku
         self._set_running(True)
         self.worker = ReadWorker(todo, self._client(), self.var_model.get().strip(),
-                                 self.queue, batch_size=batch, use_cache=self.var_cache.get(),
+                                 self.queue, batch_size=batch,
+                                 use_cache=self.var_cache.get() if use_cache is None else use_cache,
                                  rules=self.cfg.get("prompt_rules"),
-                                 notes=self.cfg.get("collection_notes"))
+                                 notes=self.cfg.get("collection_notes"),
+                                 detail=detail, mode=self.mode, page=self.page_index)
         self.worker.start()
-        self.log(f"Start odczytu: {len(todo)} plikow, {PROVIDERS[self.var_provider.get()]}, "
-                 f"model {self.var_model.get()}.")
+        self.log(f"Start odczytu: {len(todo)} plikow, {MODES[self.mode]}"
+                 + (f", strona {self.page_index + 1}" if self.mode == MODE_ISSUES else "")
+                 + f", {PROVIDERS[self.var_provider.get()]}, model {self.var_model.get()}"
+                 + (", obraz dokladny" if detail else "") + ".")
+
+    def reread_selected(self, detail: bool):
+        """Ponowny odczyt AI podswietlonych wierszy - zawsze nowe zapytanie (bez cache)."""
+        recs = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
+        if not recs:
+            messagebox.showinfo(APP_NAME, "Podswietl wiersze do ponownego odczytu.")
+            return
+        manual = [r for r in recs if "recznie" in (r.get("status") or "")]
+        if manual and not messagebox.askyesno(
+                APP_NAME, f"{len(manual)} z nich poprawiono recznie. Odczytac je ponownie "
+                          "(reczna poprawka zostanie zastapiona odczytem AI)?"):
+            recs = [r for r in recs if r not in manual]
+        for r in recs:
+            if "recznie" in (r.get("status") or ""):
+                r["status"] = "nowy"
+        if recs:
+            self.start_read(recs, use_cache=False, detail=detail)
 
     def _set_running(self, running: bool):
         self._busy = running
@@ -1078,7 +1329,6 @@ class App(tk.Tk):
         self.btn_pause.config(state="normal" if running else "disabled", text="Pauza")
         self.btn_stop.config(state="normal" if running else "disabled")
         self.btn_rename.config(state="disabled" if running else "normal")
-        self.btn_refine.config(state="disabled" if running else "normal")
 
     def toggle_pause(self):
         if not self.worker:
@@ -1105,14 +1355,13 @@ class App(tk.Tk):
         self.after(120, self.poll_queue)
 
     def _handle_event(self, kind: str, data: dict):
-        if kind == "record" and getattr(self, "_refine", None) is not None:
-            data["rec"]["_refined"] = True
         if kind == "report_progress":
             self.set_progress(data["done"], data["total"], data["op"])
         elif kind == "report_loaded":
             self._reports_loaded(data)
         elif kind == "record":
             r = data["rec"]
+            r.pop("_pending", None)
             self.compute_name(r)
             self.update_row(r)
             self.mark_dirty()
@@ -1122,11 +1371,15 @@ class App(tk.Tk):
             self._plan_total = data["to_send"]
         elif kind == "progress":
             self.set_progress(data["done"], data["total"], "Odczyt AI", data["elapsed"])
+            self._refresh_usage()
         elif kind == "batch_start":
             self.set_status(f"Zapytanie {data['index']}/{data['count']}...")
         elif kind == "waiting":
             self.log(f"Czekam {data['delay']:.0f}s przed ponowieniem (proba {data['attempt']}).")
             self.set_status(f"Limit/blad - ponawiam za {data['delay']:.0f}s...")
+        elif kind == "throttle":
+            self.set_status(f"Limit na minute wg licznika programu - czekam {data['delay']:.0f}s...")
+            self._refresh_usage()
         elif kind == "paused":
             self.set_status("Wstrzymano.")
         elif kind == "resumed":
@@ -1136,6 +1389,9 @@ class App(tk.Tk):
         elif kind == "fatal":
             self.log("BLAD KRYTYCZNY: " + data["error"])
             messagebox.showerror(APP_NAME, data["error"])
+        elif kind == "daily_limit":
+            self.log("LIMIT DZIENNY: " + data["error"])
+            self._daily_limit_msg = data["error"]
         elif kind == "finished":
             self._set_running(False)
             msg = (f"Zakonczono{' (przerwane)' if data['stopped'] else ''}: "
@@ -1144,12 +1400,23 @@ class App(tk.Tk):
             self.log(msg)
             self.set_status(msg)
             self.recompute_all_names()
-            self.run_cross_check(silent=True)
             self.autofit_columns()
-            if getattr(self, "_refine", None) is not None:
-                self._finish_refine()
+            self._refresh_usage()
+            pending = [r for r in (self.worker.records if self.worker else []) if r.pop("_pending", False)]
+            if data.get("daily_limit") and self.worker is not None:
+                # do wznowienia zostaja zaznaczone tylko pliki, ktorych nie odczytano
+                ids = {id(r) for r in pending}
+                for r in self.worker.records:
+                    r["checked"] = id(r) in ids
+                left = len(pending)
+                self.refresh_tree()
+                messagebox.showwarning(APP_NAME, getattr(self, "_daily_limit_msg", "Limit dzienny.")
+                                       + f"\n\nNieodczytanych plikow: {left} - zostaly zaznaczone, "
+                                         "wystarczy pozniej kliknac 'Odczytaj daty za pomoca AI'.")
             else:
-                self.apply_calendar()
+                left = sum(1 for r in self.records if needs_check(r))
+                green = sum(1 for r in self.records if status_group(r) == "certain")
+                self.set_status(msg + f" Zielone: {green}, do weryfikacji: {left}.")
         elif kind == "thumb":
             if data["token"] == self._thumb_token:
                 from PIL import ImageTk
@@ -1225,26 +1492,27 @@ class App(tk.Tk):
                 r["h2"] = h
             if r["path"] in data["sizes"]:
                 r["size"] = data["sizes"][r["path"]]
-        counts = {"pewne": 0, "watpliwe": 0, "sprzeczne": 0, "reczny": 0, "": 0}
+        counts = {"znaleziony": 0, "reczny": 0, "": 0}
         for r in self.records:
             res = report_import.apply(r, self.report_index.find(r))
             counts[res] += 1
-            if res in ("pewne", "watpliwe"):
-                self.compute_name(r)
-        self.apply_calendar()
+            if res == "znaleziony":
+                self.assess(r)
+        self.recompute_all_names()
         self.mark_dirty()
-        found = len(self.records) - counts[""]
+        read = [r for r in self.records if r.get("report_data") and r.get("ai")]
+        diff = sum(1 for r in read if any("raport" in x for x in r.get("issues") or []))
         msg = (f"Wczytano raportow: {len(data['loaded'])}\n\n"
-               f"Plikow z listy znalezionych w raportach: {found} z {len(self.records)}\n"
-               f"  - uzupelnione (pewne): {counts['pewne']}\n"
-               f"  - watpliwe w raporcie, do sprawdzenia: {counts['watpliwe']}\n"
-               f"  - raporty sie roznia, do sprawdzenia: {counts['sprzeczne']}\n"
-               f"  - pominiete (poprawione recznie): {counts['reczny']}")
+               f"Plikow z listy znalezionych w raportach: {counts['znaleziony']} z {len(self.records)}\n"
+               f"  - juz odczytanych przez AI: {len(read)}, w tym niezgodnych z raportem: {diff}\n"
+               f"  - pominiete (poprawione recznie): {counts['reczny']}\n\n"
+               "Raport nie zmienia danych - jest porownywany z odczytem AI, tak jak nazwa pliku. "
+               "Zgodne = zielone, niezgodne = do weryfikacji.")
         if data["errors"]:
             msg += "\n\nNie wczytano:\n" + "\n".join(data["errors"])
         self.log(msg.replace("\n\n", " | ").replace("\n", " "))
-        self.set_status(f"Raporty: uzupelniono {counts['pewne']}, "
-                        f"do sprawdzenia {counts['watpliwe'] + counts['sprzeczne']}.")
+        self.set_status(f"Raporty: znaleziono {counts['znaleziony']} plikow, "
+                        f"niezgodnych z odczytem AI: {diff}.")
         if not data.get("quiet"):
             messagebox.showinfo(APP_NAME, msg)
 
@@ -1253,26 +1521,28 @@ class App(tk.Tk):
         return filename_patterns.BUILTIN + filename_patterns.user_patterns(self.session_patterns)
 
     def apply_name_data(self, r: dict, patterns=None):
-        """Dane z nazwy pliku -> rekord (tytul, numer, strona, rok, ew. data do potwierdzenia)."""
+        """Dane z nazwy pliku -> rekord. Tytul, numer i strona od razu trafiaja do pol
+        nowego rekordu; wszystko, co jednoznaczne (rok, data, numer), sluzy potem do
+        porownania z odczytem AI."""
         nd = filename_patterns.parse(r.get("old_name") or Path(r["path"]).name,
                                      patterns if patterns is not None else self.patterns())
         r["name_data"] = nd
         r["pattern"] = nd["pattern"] if nd else "luzne"
-        if not nd:
-            return
+        r["name_facts"] = name_facts.facts(r) or None
         st = (r.get("status") or "").lower()
-        if st not in ("nowy", "") and "recznie" not in st:
-            return   # rekord juz odczytany - dane z nazwy wezmie przy nastepnym odczycie
-        if nd.get("title") and not r.get("title"):
-            r["title"] = nd["title"]
-        if nd.get("issue"):
-            r["issue_number"], r["issue_suffix"] = nd["issue"], nd.get("suffix")
-        if nd.get("page"):
-            r["page_number"] = nd["page"]
-        r["name_date"] = nd.get("name_date")
-        if nd.get("name_date") and not r.get("date_iso"):
-            r["date_iso"] = nd["name_date"]
+        if nd and st in ("nowy", ""):
+            if nd.get("title") and not r.get("title"):
+                r["title"] = nd["title"]
+            if nd.get("issue"):
+                r["issue_number"], r["issue_suffix"] = nd["issue"], nd.get("suffix")
+            if nd.get("page"):
+                r["page_number"] = nd["page"]
+        self.assess(r)
         self.compute_name(r)
+
+    def assess(self, r: dict):
+        """Zielony albo do weryfikacji - wg odpowiedzi AI, nazwy pliku i raportu."""
+        assess.evaluate(r, self.mode or MODE_ISSUES)
 
     def edit_patterns(self):
         PatternsDialog(self, self.session_patterns, self.cfg.get("pattern_history") or [],
@@ -1286,8 +1556,7 @@ class App(tk.Tk):
         pats = self.patterns()
         for r in self.records:
             self.apply_name_data(r, pats)
-            self.compute_name(r)
-        self.apply_calendar()
+        self.refresh_tree()
         self.autofit_columns()
         self.mark_dirty()
         summary = self.pattern_summary(self.records)
@@ -1301,15 +1570,63 @@ class App(tk.Tk):
             counts[r.get("pattern") or "luzne"] = counts.get(r.get("pattern") or "luzne", 0) + 1
         return ", ".join(f"{k}: {v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
 
+    # =============================================================== tryb sesji
+    def _update_mode_label(self):
+        if not hasattr(self, "lbl_mode"):
+            return
+        if not self.mode:
+            self.lbl_mode.config(text="Tryb sesji: nie wybrano (program zapyta przy dodaniu plikow)")
+        elif self.mode == MODE_PAGES:
+            self.lbl_mode.config(text="Tryb: Kolekcja stron - AI ustala dzien i miesiac, "
+                                      "tytul, rok, numer i strona z nazwy pliku")
+        else:
+            self.lbl_mode.config(text=f"Tryb: Kolekcja wydan - AI ustala tytul, date i numer "
+                                      f"ze strony {self.page_index + 1} PDF-a")
+
+    def ensure_mode(self) -> bool:
+        """Tryb musi byc wybrany, zanim cokolwiek zostanie odczytane."""
+        if self.mode:
+            return True
+        choice = ModeDialog.ask(self, "Tryb sesji", assess.guess_mode(self.records) if self.records else None, 0)
+        if choice is None:
+            return False
+        self.mode, self.page_index = choice
+        self._update_mode_label()
+        for r in self.records:
+            self.assess(r)
+            self.compute_name(r)
+        self.refresh_tree()
+        self.mark_dirty()
+        return True
+
+    def session_settings(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo(APP_NAME, "Trwa odczyt - poczekaj, az sie skonczy.")
+            return
+        choice = ModeDialog.ask(self, "Ustawienia sesji", self.mode, self.page_index)
+        if choice is None or choice == (self.mode, self.page_index):
+            return
+        old_page = self.page_index
+        self.mode, self.page_index = choice
+        self._update_mode_label()
+        for r in self.records:
+            self.assess(r)
+            self.compute_name(r)
+        self.refresh_tree()
+        self.mark_dirty()
+        self.log(f"Ustawienia sesji: {MODES[self.mode]}"
+                 + (f", strona dla AI: {self.page_index + 1}" if self.mode == MODE_ISSUES else ""))
+        if self.mode == MODE_ISSUES and old_page != self.page_index and any(r.get("ai") for r in self.records):
+            messagebox.showinfo(APP_NAME, "Nowa strona dotyczy kolejnych odczytow. Pliki odczytane "
+                                          "wczesniej (z innej strony) zaznacz i odczytaj ponownie - "
+                                          "cache ma osobne wpisy dla kazdej strony.")
+
     # =============================================================== nazwy
     def compute_name(self, r: dict):
         name, err = naming.build_new_name(r, self.var_title_override.get().strip())
         r["new_name"] = name
         r["name_complete"] = not err
-        if err and r.get("status", "").startswith("odczytano"):
-            r["status"] = "brak danych"
-            if err not in (r.get("note") or ""):
-                r["note"] = (r.get("note") + "; " if r.get("note") else "") + err
+        r["name_missing"] = err
         return name
 
     def recompute_all_names(self):
@@ -1329,256 +1646,47 @@ class App(tk.Tk):
             EditDialog(self, r, self._after_edit)
 
     def open_verify(self):
-        """Duze okno z podgladem strony dla rekordow wymagajacych sprawdzenia.
-
-        Gdy w tabeli podswietlono kilka wierszy - weryfikuje wlasnie je.
-        """
+        """Okno z duzym podgladem strony - najpierw wybor zakresu rekordow."""
         sel = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
-        recs = sel if len(sel) > 1 else [r for r in self._visible_records() if needs_check(r)]
+        VerifyScopeDialog(self, len(sel), self._verify_run)
+
+    def verify_scope(self, scope: str, only_check: bool) -> list[dict]:
+        visible = {id(r) for r in self.by_iid.values()}
+        if scope == "podswietlone":
+            recs = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
+        elif scope == "widoczne":
+            recs = [r for r in self.records if id(r) in visible]
+        elif scope == "zaznaczone":
+            recs = [r for r in self.records if r.get("checked")]
+        elif scope == "widoczne_zaznaczone":
+            recs = [r for r in self.records if id(r) in visible and r.get("checked")]
+        else:
+            recs = list(self.records)
+        if only_check:
+            recs = [r for r in recs if needs_check(r)]
+        return recs
+
+    def _verify_run(self, scope: str, only_check: bool):
+        recs = self.verify_scope(scope, only_check)
         if not recs:
-            recs = [r for r in self.records if needs_check(r)]
-        if not recs:
-            messagebox.showinfo(APP_NAME, "Nie ma rekordow do sprawdzenia.")
+            messagebox.showinfo(APP_NAME, "W wybranym zakresie nie ma rekordow do weryfikacji.")
             return
-        self._verify_cal = self.build_calendar()
-        VerifyDialog(self, recs, self._after_edit, self._after_verify, suggest=self.suggest_for)
-
-    def suggest_for(self, rec: dict, issue: str, date_iso: str | None):
-        """Podpowiedz do okna weryfikacji: (data, numer, skad) albo None."""
-        cal = getattr(self, "_verify_cal", None) or self.build_calendar()
-        title = rec.get("title") or self.var_title_override.get().strip()
-        if issue:
-            # najpierw pozostale strony tego samego wydania (kolekcje stron)
-            key = calendar_model.issue_int(issue)
-            same = [r.get("date_iso") for r in self.records
-                    if r is not rec and r.get("date_iso") and not needs_check(r)
-                    and calendar_model.issue_int(r.get("issue_number")) == key
-                    and (r.get("name_data") or {}).get("year") == (rec.get("name_data") or {}).get("year")
-                    and calendar_model.norm_title(r.get("title")) == calendar_model.norm_title(title)
-                    and (r.get("issue_suffix") or "") == (rec.get("issue_suffix") or "")]
-            if same:
-                best = max(set(same), key=same.count)
-                return best, issue, f"pozostale strony tego wydania ({same.count(best)} str.)"
-            p = cal.predict(title, issue, rec.get("issue_suffix"), exclude=rec,
-                            near=calendar_model.near_of(rec))
-            if p:
-                tol = f", +-{p.tol} dni" if p.tol else ""
-                return p.date_iso, issue, f"kalendarz wydan: {p.basis}{tol}"
-            return None
-        if date_iso:
-            got = cal.predict_issue(title, date_iso, exclude=rec, near=calendar_model.near_of(rec))
-            if got:
-                return date_iso, got[0], f"kalendarz wydan: {got[1]}"
-            return None
-        # ani numeru, ani daty - numer z sasiednich plikow na liscie
-        try:
-            pos = self.records.index(rec)
-        except ValueError:
-            return None
-
-        def known(r):
-            n = calendar_model.issue_int(r.get("issue_number"))
-            return n if n is not None and not needs_check(r) else None
-        prev = next(((i, known(self.records[i])) for i in range(pos - 1, max(-1, pos - 6), -1)
-                     if known(self.records[i]) is not None), None)
-        nxt = next(((i, known(self.records[i])) for i in range(pos + 1, min(len(self.records), pos + 6))
-                    if known(self.records[i]) is not None), None)
-        if prev and nxt and nxt[1] - prev[1] == nxt[0] - prev[0]:
-            n = prev[1] + (pos - prev[0])
-            p = cal.predict(title, n, None, exclude=rec, near=calendar_model.near_of(rec))
-            return (p.date_iso if p else None), n, "sasiednie pliki na liscie + kalendarz wydan"
-        return None
+        VerifyDialog(self, recs, self._after_edit, self._after_verify,
+                     start_page=self.page_index if self.mode == MODE_ISSUES else 0,
+                     pages_mode=self.mode == MODE_PAGES)
 
     def _after_verify(self, saved: int):
         self.refresh_tree()
         left = sum(1 for r in self.records if needs_check(r))
-        self.set_status(f"Weryfikacja: poprawiono {saved}, do sprawdzenia zostalo {left}.")
+        self.set_status(f"Weryfikacja: poprawiono {saved}, do weryfikacji zostalo {left}.")
 
     def _after_edit(self, r: dict):
         r["status"] = "poprawione recznie"
+        r["issues"] = None
         r["note"] = ""
-        r["report_flag"] = False
-        r["vote_conflict"] = False
-        r["cal_filled"] = False
-        r["group_filled"] = False
-        r["year_mismatch"] = False
-        r["name_unconfirmed"] = False
-        r["outlier"] = False
-        r["cal_state"], r["cal_info"] = None, ""
         self.compute_name(r)
         self.update_row(r)
         self.mark_dirty()
-
-    # =============================================================== walidacja
-    def run_cross_check(self, silent: bool = False):
-        done = [r for r in self.records if r.get("date_iso") and r.get("issue_number")]
-        if not done:
-            if not silent:
-                messagebox.showinfo(APP_NAME, "Brak odczytanych rekordow do sprawdzenia.")
-            return
-        summary = validate.cross_check(self.records)
-        self.refresh_tree()
-
-        lines = []
-        total_out = 0
-        for title, info in sorted(summary.items()):
-            if not info.get("checked"):
-                lines.append(f"{title}: {info['count']} rekordow - {info['reason']}")
-                continue
-            total_out += info["outliers"]
-            dpi = info.get("days_per_issue") or 0
-            lines.append(f"{title}: {info['count']} rekordow, "
-                         f"srednio {dpi:.1f} dnia na numer, "
-                         f"podejrzanych: {info['outliers']}")
-        text = "\n".join(lines) if lines else "Brak grup do sprawdzenia."
-        self.log("Walidacja krzyzowa:\n  " + text.replace("\n", "\n  "))
-        self.set_status(f"Walidacja: {total_out} podejrzanych rekordow.")
-        if not silent:
-            messagebox.showinfo(APP_NAME, f"Wynik walidacji numer-data:\n\n{text}\n\n"
-                                          f"Podejrzane wiersze sa podswietlone.\n"
-                                          f"Filtr 'podejrzane' pokaze tylko je.")
-
-    def _chrono_changed(self):
-        mode = self.var_chrono.get()
-        self.apply_calendar()
-        self.mark_dirty()
-        self.log(f"Chronologia lp: {collection_checks.CHRONO_MODES[mode]}")
-        self.set_status(f"Chronologia lp: {collection_checks.CHRONO_MODES[mode]}")
-
-    def build_calendar(self) -> calendar_model.Calendar:
-        entries = [e for lst in self.report_index.by_path.values() for e in lst]
-        # wiersze bez sciezki tez niosa wiedze
-        seen = {id(e) for e in entries}
-        entries += [e for lst in self.report_index.by_hash.values() for e in lst if id(e) not in seen]
-        return calendar_model.build(self.records, entries, VERIFY_CONFIDENCE)
-
-    def apply_calendar(self, show: bool = False) -> dict:
-        """Sprawdza odczytane rekordy z kalendarzem wydan (numer -> data)."""
-        cc = collection_checks.check(self.records, self.var_chrono.get())
-        cal = self.build_calendar()
-        counts = calendar_model.check_records(cal, self.records)
-        for r in self.records:
-            if r.get("cal_state") == "ok" or r.get("group_ok"):
-                r["outlier"] = False   # lokalne kontrole sa mocniejsze od prostej globalnej
-            if r.get("group_filled"):
-                self.compute_name(r)
-        self.refresh_tree()
-        msg = (f"Kalendarz wydan: {cal.anchors()} pewnych par numer-data. "
-               f"Zgodnych: {counts['ok']}, niezgodnych: {counts['conflict']}, "
-               f"bez oceny: {counts['none']}.")
-        if cc["group_ok"] or cc["group_conflict"] or cc["group_filled"] or cc["chrono"]:
-            msg += (f" Strony wydan: zgodnych {cc['group_ok']}, sprzecznych {cc['group_conflict']}, "
-                    f"uzupelnionych {cc['group_filled']}. Naruszona chronologia: {cc['chrono']}.")
-        self.log(msg)
-        if show:
-            messagebox.showinfo(APP_NAME, msg.replace(". ", ".\n") +
-                                "\n\nNiezgodne sa w filtrze 'do sprawdzenia'.")
-        return counts
-
-    # =============================================================== dopracowanie
-    def _provider_keys(self) -> dict:
-        """Dostawcy, dla ktorych jest zapisany klucz -> (klucz, model, rpm)."""
-        self._store_provider_fields(self.var_provider.get())
-        out = {}
-        for prov, (k_key, k_model, k_rpm, d_rpm) in PROVIDER_CFG.items():
-            if (self.cfg.get(k_key) or "").strip():
-                out[prov] = (self.cfg[k_key].strip(), self.cfg.get(k_model) or "",
-                             int(self.cfg.get(k_rpm, d_rpm)))
-        return out
-
-    def open_refine(self, selected: bool = False):
-        if self.worker and self.worker.is_alive():
-            messagebox.showinfo(APP_NAME, "Trwa odczyt - poczekaj, az sie skonczy.")
-            return
-        if selected:
-            recs = [self.by_iid[i] for i in self.tree.selection() if i in self.by_iid]
-            if not recs:
-                messagebox.showinfo(APP_NAME, "Podswietl wiersze do ponownego odczytu.")
-                return
-        else:
-            recs = [r for r in self.records if needs_check(r)]
-            if not recs:
-                messagebox.showinfo(APP_NAME, "Nie ma niepewnych rekordow.")
-                return
-        RefineDialog(self, recs, selected, self._provider_keys(), self.var_provider.get(),
-                     self._start_refine)
-
-    def _start_refine(self, recs: list[dict], force_all: bool, use_ai: bool,
-                      provider: str, model: str, detail: bool):
-        before = sum(1 for r in self.records if needs_check(r))
-        # krok 1: kalendarz wydan - bez zapytan
-        cal = self.build_calendar()
-        filled = refine.fill_from_calendar(cal, recs)
-        for r in recs:
-            self.compute_name(r)
-        self.apply_calendar()
-        after_cal = sum(1 for r in self.records if needs_check(r))
-        info = {"before": before, "after_cal": after_cal, "filled": filled}
-
-        todo = recs if force_all else [r for r in recs if needs_check(r)]
-        if not use_ai or not todo:
-            self._refine_report(info, None)
-            return
-        keys = self._provider_keys()
-        key, _m, rpm = keys[provider]
-        client = (GeminiClient if provider == "gemini" else OpenRouterClient)(key, model, rpm=rpm)
-        for r in todo:
-            refine.snapshot(r)
-            r["_refined"] = False
-        self._refine = {"recs": todo, "info": info, "model": model, "provider": provider}
-        self._set_running(True)
-        self.worker = ReadWorker(todo, client, model, self.queue,
-                                 batch_size=1 if detail else max(1, int(self.var_batch.get())),
-                                 use_cache=False, rules=self.cfg.get("prompt_rules"),
-                                 notes=self.cfg.get("collection_notes"), detail=detail)
-        self.worker.start()
-        self.log(f"Dopracowanie: drugi odczyt {len(todo)} plikow, {PROVIDERS[provider]}, "
-                 f"model {model}{', obraz dokladny' if detail else ''}.")
-
-    def _finish_refine(self):
-        ref, self._refine = self._refine, None
-        cal = self.build_calendar()
-        votes = {"potwierdzone": 0, "sprzeczne": 0}
-        for r in ref["recs"]:
-            if r.pop("_refined", False):
-                if (r.get("status") or "").startswith("blad"):
-                    # drugi odczyt sie nie udal - wracamy do pierwszego
-                    first = r.get("first") or {}
-                    for k in ("date_iso", "issue_number", "issue_suffix", "confidence", "title"):
-                        r[k] = first.get(k)
-                    r["cal_filled"] = bool(first.get("cal_filled"))
-                    r["status"] = "odczytano" if r.get("date_iso") else "brak danych"
-                    r["note"] = "drugi odczyt AI nieudany - zostaje pierwszy"
-                    continue
-                votes[refine.vote(cal, r)] += 1
-                self.compute_name(r)
-        self.apply_calendar()
-        self._refine_report(ref["info"], votes)
-
-    def _refine_report(self, info: dict, votes: dict | None):
-        self.refresh_tree()
-        self.mark_dirty()
-        now = sum(1 for r in self.records if needs_check(r))
-        lines = [f"Niepewnych przed: {info['before']}",
-                 f"Po kalendarzu wydan: {info['after_cal']}"
-                 + (f" (uzupelniono z kalendarza: {info['filled']})" if info["filled"] else "")]
-        if votes is not None:
-            lines.append(f"Drugi odczyt AI: potwierdzono {votes['potwierdzone']}, "
-                         f"sprzeczne {votes['sprzeczne']}")
-        lines.append(f"\nZostalo do recznego sprawdzenia: {now}")
-        if now:
-            lines.append("Przycisk 'Weryfikuj' przeprowadzi Cie przez nie po kolei.")
-        msg = "\n".join(lines)
-        self.log("Dopracowanie: " + msg.replace("\n", " | "))
-        self.set_status(f"Dopracowanie: do sprawdzenia zostalo {now}.")
-        messagebox.showinfo(APP_NAME, msg)
-
-    def run_fill_years(self):
-        n = validate.fill_missing_years(self.records)
-        self.recompute_all_names()
-        self.log(f"Uzupelniono rok w {n} rekordach.")
-        messagebox.showinfo(APP_NAME, f"Uzupelniono brakujacy rok w {n} rekordach.\n"
-                                      f"Sprawdz je przed zmiana nazw.")
 
     # =============================================================== rename
     def rename_scope(self, scope: str) -> list[dict]:
@@ -1673,10 +1781,14 @@ class App(tk.Tk):
     def new_session(self):
         if not self._confirm_discard():
             return
+        choice = ModeDialog.ask(self, "Nowa sesja", None, 0)
+        if choice is None:
+            return
         self.records = []
         self.session_path = None
         self.session_patterns = []
-        self.var_chrono.set("warn")
+        self.mode, self.page_index = choice
+        self._update_mode_label()
         self.refresh_tree()
         self.txt_detail.delete("1.0", "end")
         self.lbl_thumb.config(image="", text="(zaznacz wiersz)")
@@ -1757,23 +1869,39 @@ class App(tk.Tk):
         self.session_path = path
         if meta.get("model") and meta.get("provider", "openrouter") == self.var_provider.get():
             self.var_model.set(meta["model"])
+            self._load_limits()
         if meta.get("title_override"):
             self.var_title_override.set(meta["title_override"])
         self.session_patterns = list(meta.get("patterns") or [])
-        self.var_chrono.set(meta.get("chrono") or "warn")
+        mode = meta.get("mode")
+        page = int(meta.get("page") or 1) - 1
+        if mode not in MODES:
+            # sesja ze starszej wersji programu - pytamy o tryb, z propozycja wg typu plikow
+            choice = ModeDialog.ask(self, f"Tryb sesji: {Path(path).stem}", assess.guess_mode(records), 0,
+                                    info="Ta sesja pochodzi ze starszej wersji programu i nie ma "
+                                         "zapisanego trybu. Wybierz go - program zapamieta wybor "
+                                         "przy zapisie sesji.")
+            mode, page = choice if choice else (assess.guess_mode(records), 0)
+            migrated = True
+        else:
+            migrated = False
+        self.mode, self.page_index = mode, max(0, page)
+        self._update_mode_label()
+        legacy = 0
         for r in self.records:
-            if "name_data" not in r or r.get("name_data") is None:
-                self.apply_name_data(r)   # sesje ze starszej wersji programu
-            self.compute_name(r)
+            legacy += self._migrate_record(r)
+            self.apply_name_data(r)      # dane z nazwy + ocena (zielony / do weryfikacji)
         missing = sum(1 for r in self.records if not Path(r.get("path", "")).exists())
-        # wyniki kontroli zapisane w sesji moga pochodzic ze starszej wersji programu
-        validate.cross_check(self.records)
-        self.apply_calendar()
+        self.refresh_tree()
         self.autofit_columns()
-        self.mark_dirty(False)
+        self.mark_dirty(migrated)
         self._remember_session(path)
-        self.title(f"{APP_NAME} {APP_VERSION} - {Path(path).stem}")
-        self.log(f"Wczytano sesje: {path} ({len(records)} rekordow, brakujacych plikow: {missing})")
+        self.title(f"{APP_NAME} {APP_VERSION} - {Path(path).stem}{' *' if migrated else ''}")
+        self.log(f"Wczytano sesje: {path} ({len(records)} rekordow, brakujacych plikow: {missing}, "
+                 f"tryb: {MODES[self.mode]})")
+        if legacy:
+            self.log(f"Przeniesiono {legacy} rekordow ze starszej wersji programu - ocenione od nowa "
+                     "wg odpowiedzi AI, nazwy pliku i raportow (bez kalendarza wydan).")
         if missing:
             messagebox.showwarning(APP_NAME,
                                    f"{missing} plikow z sesji nie istnieje pod zapisana sciezka "
@@ -1795,9 +1923,41 @@ class App(tk.Tk):
         self.session_path = path
         return self._write_session(path)
 
+    def _migrate_record(self, r: dict) -> int:
+        """Rekord ze starszej sesji: odpowiedz AI do pola 'ai', dane z raportu do
+        'report_data', a wartosci wstawione przez dawne kontrole (kalendarz wydan,
+        strony wydania) usuniete. Zwraca 1, gdy cos przeniesiono."""
+        if r.get("ai") is not None or r.get("issues") is not None:
+            return 0
+        st = (r.get("status") or "").lower()
+        if "recznie" in st or "zmieniono" in st or "cofnieto" in st or st in ("", "nowy"):
+            return 0
+        if "blad" in st:
+            return 0
+        if "raport" in st and not r.get("model"):
+            # dawniej dane z raportu wpisywano do rekordu - teraz sa tylko do porownania
+            if r.get("date_iso") or r.get("issue_number"):
+                r["report_data"] = [{"date_iso": r.get("date_iso"), "issue_number": r.get("issue_number"),
+                                     "issue_suffix": r.get("issue_suffix"), "src": "raport (starsza sesja)",
+                                     "status": "", "note": ""}]
+            for k in ("date_iso", "issue_number", "issue_suffix", "confidence"):
+                r[k] = None
+            r["status"], r["note"] = "nowy", ""
+            return 1
+        ai = assess.ai_from_legacy(r)
+        if ai is None:
+            r["status"], r["note"] = "nowy", ""
+            return 1
+        r["ai"] = ai
+        r["status"] = assess.STATUS_OK
+        for k in ("cal_filled", "group_filled"):
+            r.pop(k, None)
+        return 1
+
     def _write_session(self, path: str) -> bool:
         meta = {"model": self.var_model.get(), "provider": self.var_provider.get(),
-                "patterns": self.session_patterns, "chrono": self.var_chrono.get(),
+                "patterns": self.session_patterns, "mode": self.mode or MODE_ISSUES,
+                "page": self.page_index + 1,
                 "title_override": self.var_title_override.get(),
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
@@ -1908,20 +2068,24 @@ class App(tk.Tk):
 
     def show_stats(self):
         total = len(self.records)
-        read = sum(1 for r in self.records if (r.get("status") or "").startswith("odczytano"))
-        miss = sum(1 for r in self.records if (r.get("status") or "").startswith("brak danych"))
-        err = sum(1 for r in self.records if "blad" in (r.get("status") or "").lower())
-        out = sum(1 for r in self.records if r.get("outlier"))
+        new = sum(1 for r in self.records if status_group(r) == "new")
+        err = sum(1 for r in self.records if status_group(r) == "error")
+        green = sum(1 for r in self.records if status_group(r) == "certain")
+        check = sum(1 for r in self.records if needs_check(r))
         ready = sum(1 for r in self.records if r.get("name_complete"))
         renamed = sum(1 for r in self.records if "zmieniono" in (r.get("status") or ""))
+        confs = [r["confidence"] for r in self.records if r.get("confidence") is not None]
+        avg = f"{sum(confs) / len(confs):.2f}" if confs else "-"
         messagebox.showinfo(APP_NAME,
+                            f"Tryb sesji:              {MODES.get(self.mode, '-')}\n\n"
                             f"Plikow na liscie:        {total}\n"
-                            f"Odczytanych:             {read}\n"
-                            f"Niekompletnych:          {miss}\n"
-                            f"Bledow:                  {err}\n"
-                            f"Podejrzanych (walidacja):{out}\n"
+                            f"Nieczytanych:            {new}\n"
+                            f"Zielonych (pewnych):     {green}\n"
+                            f"Do weryfikacji:          {check}\n"
+                            f"  w tym bledow odczytu:  {err}\n"
                             f"Z gotowa nowa nazwa:     {ready}\n"
-                            f"Po zmianie nazwy:        {renamed}\n\n"
+                            f"Po zmianie nazwy:        {renamed}\n"
+                            f"Srednia pewnosc modelu:  {avg}\n\n"
                             f"Wpisow w cache:          {cache_db.count()}")
 
     def about(self):
@@ -1930,6 +2094,8 @@ class App(tk.Tk):
             f"{APP_NAME} {APP_VERSION}\n\n"
             "Odczyt daty i numeru wydania ze skanow czasopism\n"
             "za pomoca modeli multimodalnych (OpenRouter, Google Gemini).\n\n"
+            "Kolekcja wydan: AI ustala tytul, date i numer wydania.\n"
+            "Kolekcja stron: AI ustala dzien i miesiac, reszta z nazwy pliku.\n\n"
             "Format nazwy:\n"
             "  Tytul - RRRR-MM-DD - 000638.pdf\n"
             "  Tytul - RRRR-MM-DD - 000638 - 015.jpg\n"
@@ -2143,76 +2309,126 @@ class EditDialog(tk.Toplevel):
         self.destroy()
 
 
-class RefineDialog(tk.Toplevel):
-    """Ustawienia dopracowania niepewnych / ponownego odczytu podswietlonych."""
+class ModeDialog(tk.Toplevel):
+    """Tryb sesji: kolekcja wydan (PDF-y, AI ustala date i numer z wybranej strony)
+    albo kolekcja stron (pojedyncze skany, AI ustala dzien i miesiac)."""
 
-    def __init__(self, parent: App, recs: list[dict], selected: bool, keys: dict,
-                 current: str, on_start):
+    TEXTS = {
+        MODE_ISSUES: ("Kolekcja wydan",
+                      "Pliki PDF z calymi wydaniami. AI odczytuje tytul, date i numer wydania "
+                      "z jednej strony (domyslnie pierwszej), program sklada z nich nowa nazwe."),
+        MODE_PAGES: ("Kolekcja stron",
+                     "Pliki graficzne z pojedynczymi stronami albo rozkladowkami. Tytul, rok, numer "
+                     "wydania i numer strony sa w nazwie pliku - AI ustala tylko dzien i miesiac."),
+    }
+
+    @classmethod
+    def ask(cls, parent, title: str, mode: str | None, page: int, info: str = ""):
+        dlg = cls(parent, title, mode, page, info)
+        parent.wait_window(dlg)
+        return dlg.result
+
+    def __init__(self, parent, title: str, mode: str | None, page: int, info: str):
         super().__init__(parent)
-        self.title("Ponow odczyt" if selected else "Dopracuj niepewne")
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = None
+        if info:
+            ttk.Label(self, text=info, wraplength=520, justify="left", foreground="#a86400"
+                      ).pack(anchor="w", padx=12, pady=(12, 0))
+        ttk.Label(self, text="Jaki to rodzaj kolekcji?", font=("TkDefaultFont", 10, "bold")
+                  ).pack(anchor="w", padx=12, pady=(12, 6))
+        self.var_mode = tk.StringVar(value=mode or "")
+        for key, (label, desc) in self.TEXTS.items():
+            ttk.Radiobutton(self, text=label, value=key, variable=self.var_mode,
+                            command=self._update).pack(anchor="w", padx=16, pady=(6, 0))
+            ttk.Label(self, text=desc, wraplength=480, justify="left", foreground="#555"
+                      ).pack(anchor="w", padx=38)
+            if key == MODE_ISSUES:
+                row = ttk.Frame(self)
+                row.pack(anchor="w", padx=38, pady=(4, 0))
+                ttk.Label(row, text="Strona PDF-a wysylana do AI:").pack(side="left")
+                self.var_page = tk.IntVar(value=page + 1)
+                self.spin = ttk.Spinbox(row, from_=1, to=999, width=5, textvariable=self.var_page)
+                self.spin.pack(side="left", padx=6)
+                ttk.Label(row, text="(1 = pierwsza; zmien, gdy gazeta ma date i numer na innej stronie)",
+                          foreground="#555").pack(side="left")
+        btns = ttk.Frame(self)
+        btns.pack(pady=12)
+        self.btn_ok = ttk.Button(btns, text="OK", command=self.ok)
+        self.btn_ok.pack(side="left", padx=4)
+        ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
+        self.bind("<Return>", lambda e: self.ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._update()
+        self.grab_set()
+
+    def _update(self):
+        self.spin.state(["!disabled"] if self.var_mode.get() == MODE_ISSUES else ["disabled"])
+        self.btn_ok.state(["!disabled"] if self.var_mode.get() in MODES else ["disabled"])
+
+    def ok(self):
+        mode = self.var_mode.get()
+        if mode not in MODES:
+            return
+        try:
+            page = max(1, int(self.var_page.get()))
+        except (tk.TclError, ValueError):
+            messagebox.showwarning(APP_NAME, "Podaj numer strony (1, 2, 3...).", parent=self)
+            return
+        self.result = (mode, page - 1 if mode == MODE_ISSUES else 0)
+        self.destroy()
+
+
+class VerifyScopeDialog(tk.Toplevel):
+    """Zakres weryfikacji: wszystkie / widoczne / zaznaczone / widoczne i zaznaczone."""
+
+    SCOPES = [("wszystkie", "wszystkie"), ("widoczne", "widoczne (po filtrze)"),
+              ("zaznaczone", "zaznaczone (\u2611)"), ("widoczne_zaznaczone", "widoczne i zaznaczone")]
+
+    def __init__(self, parent: App, n_selected: int, on_ok):
+        super().__init__(parent)
+        self.title("Weryfikuj")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
-        self.recs, self.selected, self.keys, self.on_start = recs, selected, keys, on_start
-        pad = {"padx": 12, "pady": 3}
-
-        head = (f"Podswietlonych rekordow: {len(recs)}" if selected
-                else f"Niepewnych rekordow: {len(recs)}")
-        ttk.Label(self, text=head, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
-        ttk.Label(self, text="1. Kalendarz wydan - sprawdza daty z numerami pewnych wydan "
-                             "(bez zapytan do AI).", wraplength=520, justify="left").pack(anchor="w", **pad)
-
-        self.var_ai = tk.BooleanVar(value=bool(keys))
-        ttk.Checkbutton(self, text="2. Drugi odczyt AI tych, ktore dalej sa niepewne"
-                        if not selected else "2. Ponowny odczyt AI",
-                        variable=self.var_ai).pack(anchor="w", **pad)
-        box = ttk.Frame(self)
-        box.pack(fill="x", padx=32)
-        self.var_prov = tk.StringVar(value=current if current in keys else next(iter(keys), ""))
-        for prov in PROVIDERS:
-            rb = ttk.Radiobutton(box, text=PROVIDERS[prov] + ("" if prov in keys else " (brak klucza)"),
-                                 value=prov, variable=self.var_prov, command=self._prov_changed)
-            rb.pack(anchor="w")
-            if prov not in keys:
-                rb.state(["disabled"])
-        row = ttk.Frame(box)
-        row.pack(fill="x", pady=4)
-        ttk.Label(row, text="Model:").pack(side="left")
-        self.var_model = tk.StringVar()
-        ttk.Entry(row, textvariable=self.var_model, width=44).pack(side="left", padx=6)
-        ttk.Label(box, text="Najlepiej inny model niz przy pierwszym odczycie - wtedy zgodnosc "
-                            "dwoch odczytow cos znaczy.", foreground="#555", wraplength=480,
-                  justify="left").pack(anchor="w")
-        self.var_detail = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="obraz dokladny: wyzsza rozdzielczosc + powiekszona gora strony "
-                                  "(1 plik na zapytanie)", variable=self.var_detail
-                        ).pack(anchor="w", pady=(6, 0))
-        ttk.Label(self, text="3. Rekord robi sie pewny tylko, gdy zgadzaja sie dwa niezalezne zrodla "
-                             "(dwa odczyty AI albo odczyt i kalendarz). Sprzeczne zostaja do "
-                             "sprawdzenia z podpowiedzia.", wraplength=520, justify="left"
-                  ).pack(anchor="w", padx=12, pady=(8, 3))
-        if not keys:
-            ttk.Label(self, text="Brak zapisanego klucza API - zadziala tylko kalendarz wydan.",
-                      foreground="#b00020").pack(anchor="w", **pad)
+        self.app, self.on_ok = parent, on_ok
+        ttk.Label(self, text="Ktore rekordy weryfikowac?", font=("TkDefaultFont", 10, "bold")
+                  ).pack(anchor="w", padx=12, pady=(12, 6))
+        scopes = list(self.SCOPES)
+        if n_selected > 1:
+            scopes.append(("podswietlone", "podswietlone wiersze"))
+        self.var_scope = tk.StringVar(value="podswietlone" if n_selected > 1 else "wszystkie")
+        self.var_only = tk.BooleanVar(value=True)
+        self.labels = {}
+        for key, label in scopes:
+            rb = ttk.Radiobutton(self, text=label, value=key, variable=self.var_scope, command=self._update)
+            rb.pack(anchor="w", padx=20)
+            self.labels[key] = (rb, label)
+        ttk.Checkbutton(self, text="tylko do weryfikacji (bez zielonych i nieczytanych)",
+                        variable=self.var_only, command=self._update).pack(anchor="w", padx=12, pady=(10, 2))
+        self.lbl = ttk.Label(self, text="", foreground="#00509e")
+        self.lbl.pack(anchor="w", padx=12, pady=6)
         btns = ttk.Frame(self)
-        btns.pack(pady=12)
-        ttk.Button(btns, text="Start", command=self.ok).pack(side="left", padx=4)
+        btns.pack(pady=(4, 12))
+        ttk.Button(btns, text="Weryfikuj", command=self.ok).pack(side="left", padx=4)
         ttk.Button(btns, text="Anuluj", command=self.destroy).pack(side="left", padx=4)
-        self._prov_changed()
+        self.bind("<Return>", lambda e: self.ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._update()
 
-    def _prov_changed(self):
-        k = self.keys.get(self.var_prov.get())
-        self.var_model.set(k[1] if k else "")
+    def _update(self):
+        only = self.var_only.get()
+        for key, (rb, label) in self.labels.items():
+            rb.config(text=f"{label}:  {len(self.app.verify_scope(key, only))}")
+        n = len(self.app.verify_scope(self.var_scope.get(), only))
+        self.lbl.config(text=f"Rekordow do przejrzenia: {n}")
 
     def ok(self):
-        use_ai = self.var_ai.get() and self.var_prov.get() in self.keys
-        model = self.var_model.get().strip()
-        if use_ai and not model:
-            messagebox.showwarning(APP_NAME, "Podaj model do drugiego odczytu.", parent=self)
-            return
+        scope, only = self.var_scope.get(), self.var_only.get()
         self.destroy()
-        self.on_start(self.recs, self.selected, use_ai, self.var_prov.get(), model,
-                      self.var_detail.get())
+        self.on_ok(scope, only)
 
 
 class PatternsDialog(tk.Toplevel):
