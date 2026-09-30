@@ -35,7 +35,12 @@ def _usable(r: dict) -> bool:
                 or "niejednoznaczna" in (r.get("note") or ""))
 
 
-def check(records: list[dict]) -> dict:
+CHRONO_MODES = {"off": "wylaczona", "warn": "tylko ostrzezenie", "on": "wplywa na pewnosc"}
+
+
+def check(records: list[dict], chrono: str = "warn") -> dict:
+    """chrono: 'off' - nie sprawdzamy kolejnosci lp; 'warn' - tylko uwaga, kolor bez
+    zmian; 'on' - naruszenie chronologii = rekord do sprawdzenia."""
     counts = {"group_ok": 0, "group_conflict": 0, "group_filled": 0, "chrono": 0}
     for r in records:
         r["group_ok"] = False
@@ -89,6 +94,8 @@ def check(records: list[dict]) -> dict:
                     counts["group_ok"] += 1
 
     # --- 2. chronologia wg lp
+    if chrono == "off":
+        return counts
     series: dict[str, list[tuple]] = {}
     for r in records:
         nd = r.get("name_data") or {}
@@ -110,12 +117,14 @@ def check(records: list[dict]) -> dict:
             early = [a for a in after if a["date_iso"] < d]
             bad = len(late) + len(early)
             if bad >= 2 and bad * 2 >= len(before) + len(after):
-                r["chrono_flag"] = True
+                r["chrono_flag"] = chrono == "on"   # 'warn': sama uwaga, bez wplywu na kolor
                 ref = (late or early)[0]
                 lp = (ref.get("name_data") or {}).get("lp")
                 if late:
-                    r["chrono_info"] = f"chronologia: wczesniejszy plik lp {lp} ma pozniejsza date {ref['date_iso']}"
+                    info = f"chronologia: wczesniejszy plik lp {lp} ma pozniejsza date {ref['date_iso']}"
                 else:
-                    r["chrono_info"] = f"chronologia: pozniejszy plik lp {lp} ma wczesniejsza date {ref['date_iso']}"
+                    info = f"chronologia: pozniejszy plik lp {lp} ma wczesniejsza date {ref['date_iso']}"
+                prev = r.get("chrono_info") or ""
+                r["chrono_info"] = f"{prev}; {info}" if prev else info
                 counts["chrono"] += 1
     return counts

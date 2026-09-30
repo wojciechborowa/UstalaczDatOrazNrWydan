@@ -90,6 +90,7 @@ class App(tk.Tk):
         self._busy = False
         self.report_index = report_import.Index()
         self.session_patterns: list[dict] = []   # wlasne wzorce nazw tej sesji
+        self.var_chrono = tk.StringVar(value="warn")  # chronologia lp: off / warn / on
         self._importing = False
 
         prov = self.cfg.get("provider", "openrouter")
@@ -155,6 +156,11 @@ class App(tk.Tk):
         t.add_command(label="Sprawdz spojnosc numer-data", command=self.run_cross_check)
         t.add_command(label="Uzupelnij brakujace lata", command=self.run_fill_years)
         t.add_command(label="Sprawdz z kalendarzem wydan", command=lambda: self.apply_calendar(True))
+        ch = tk.Menu(t, tearoff=0)
+        for mode, label in collection_checks.CHRONO_MODES.items():
+            ch.add_radiobutton(label=label, value=mode, variable=self.var_chrono,
+                               command=self._chrono_changed)
+        t.add_cascade(label="Chronologia lp (ta sesja)", menu=ch)
         t.add_command(label="Dopracuj niepewne...", command=self.open_refine)
         t.add_command(label="Ponow odczyt podswietlonych (dokladniej)...",
                       command=lambda: self.open_refine(selected=True))
@@ -1419,6 +1425,13 @@ class App(tk.Tk):
                                           f"Podejrzane wiersze sa podswietlone.\n"
                                           f"Filtr 'podejrzane' pokaze tylko je.")
 
+    def _chrono_changed(self):
+        mode = self.var_chrono.get()
+        self.apply_calendar()
+        self.mark_dirty()
+        self.log(f"Chronologia lp: {collection_checks.CHRONO_MODES[mode]}")
+        self.set_status(f"Chronologia lp: {collection_checks.CHRONO_MODES[mode]}")
+
     def build_calendar(self) -> calendar_model.Calendar:
         entries = [e for lst in self.report_index.by_path.values() for e in lst]
         # wiersze bez sciezki tez niosa wiedze
@@ -1428,7 +1441,7 @@ class App(tk.Tk):
 
     def apply_calendar(self, show: bool = False) -> dict:
         """Sprawdza odczytane rekordy z kalendarzem wydan (numer -> data)."""
-        cc = collection_checks.check(self.records)
+        cc = collection_checks.check(self.records, self.var_chrono.get())
         cal = self.build_calendar()
         counts = calendar_model.check_records(cal, self.records)
         for r in self.records:
@@ -1650,6 +1663,7 @@ class App(tk.Tk):
         self.records = []
         self.session_path = None
         self.session_patterns = []
+        self.var_chrono.set("warn")
         self.refresh_tree()
         self.txt_detail.delete("1.0", "end")
         self.lbl_thumb.config(image="", text="(zaznacz wiersz)")
@@ -1733,6 +1747,7 @@ class App(tk.Tk):
         if meta.get("title_override"):
             self.var_title_override.set(meta["title_override"])
         self.session_patterns = list(meta.get("patterns") or [])
+        self.var_chrono.set(meta.get("chrono") or "warn")
         for r in self.records:
             if "name_data" not in r or r.get("name_data") is None:
                 self.apply_name_data(r)   # sesje ze starszej wersji programu
@@ -1767,7 +1782,7 @@ class App(tk.Tk):
 
     def _write_session(self, path: str) -> bool:
         meta = {"model": self.var_model.get(), "provider": self.var_provider.get(),
-                "patterns": self.session_patterns,
+                "patterns": self.session_patterns, "chrono": self.var_chrono.get(),
                 "title_override": self.var_title_override.get(),
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:

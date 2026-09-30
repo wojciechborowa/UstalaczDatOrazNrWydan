@@ -82,8 +82,10 @@ odczyt był niezależny). Dodatkowo:
   odczytanej daty dostają datę z pozostałych stron. Strona z inną datą trafia do sprawdzenia.
 - **Chronologia.** Pliki ustawione wg roku z nazwy i `lp` mają daty rosnące albo równe
   (działa i przy `lp` liczonym od nowa w każdej dekadzie, i ciągłym przez całą kolekcję).
-  Rekord łamiący kolejność wobec większości sąsiadów trafia do sprawdzenia — nie jest
-  odrzucany, bo czasem cofnięcie daty jest prawidłowe.
+  Nie w każdej kolekcji to prawda, więc *Narzędzia → Chronologia lp (ta sesja)* ma trzy
+  ustawienia: **wyłączona** (w ogóle nie sprawdzana), **tylko ostrzeżenie** (domyślnie —
+  uwaga w kolumnie Uwagi, kolor bez zmian) i **wpływa na pewność** (naruszenie
+  chronologii = rekord do sprawdzenia). Ustawienie zapisuje się w sesji.
 - **Rok ze skanu inny niż w nazwie** → do sprawdzenia.
 - **Dwie różne daty na skanie** → obie w uwagach, rekord do sprawdzenia.
 - **Data już jest w nazwie** (np. ustalona innym programem) → traktowana jako do
