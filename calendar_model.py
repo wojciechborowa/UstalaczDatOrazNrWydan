@@ -22,6 +22,7 @@ NEIGHBOURS = 3          # ile kotwic z kazdej strony bierzemy do interpolacji
 MAX_GAP = 60            # max roznica numerow miedzy kotwicami uzytymi do interpolacji
 MAX_EXTRAPOLATE = 8     # o ile numerow wolno wyjsc poza ostatnia kotwice
 MIN_STEP, MAX_STEP = 0.4, 45.0   # realny odstep miedzy numerami (dni)
+PERIOD_DAYS = 550       # przy znanym okresie (rok z nazwy) kotwice tylko z +-1,5 roku
 STRONG_TOL = 3          # zgodnosc z kalendarzem liczy sie jako potwierdzenie do tej tolerancji
 
 
@@ -81,8 +82,9 @@ class _Series:
             self._keys = sorted(self.base)
         return self._keys
 
-    def base_date(self, issue: int, exclude) -> int | None:
-        vals = [o for o, s in self.base.get(issue, []) if s is not exclude]
+    def base_date(self, issue: int, exclude, near: int | None = None) -> int | None:
+        vals = [o for o, s in self.base.get(issue, [])
+                if (exclude is None or s is not exclude) and (near is None or abs(o - near) <= PERIOD_DAYS)]
         return int(median(vals)) if vals else None
 
     def count(self) -> int:
@@ -113,30 +115,34 @@ class Calendar:
         return named[0] if len(named) == 1 else None
 
     # ------------------------------------------------------------ numer -> data
-    def predict(self, title, issue, suffix=None, exclude=None) -> Prediction | None:
+    def predict(self, title, issue, suffix=None, exclude=None, near: int | None = None) -> Prediction | None:
+        """near: ordinal daty, wokol ktorej szukamy kotwic (np. polowa roku z nazwy pliku).
+        Potrzebne, gdy numeracja wydan zaczynala sie od nowa i ten sam numer wystepuje
+        w roznych latach."""
         s = self._series_for(title)
         n = issue_int(issue)
         if s is None or n is None:
             return None
         suf = norm_suffix(suffix)
 
-        same = [o for o, src in s.exact.get((n, suf), []) if src is not exclude]
+        same = [o for o, src in s.exact.get((n, suf), [])
+                if (exclude is None or src is not exclude) and (near is None or abs(o - near) <= PERIOD_DAYS)]
         if same:
             spread = max(same) - min(same)
             return Prediction(iso(median(same)), max(0, spread),
                               f"ten sam numer w {len(same)} pewnych zrodlach", exact=True)
         if suf:
             # "bis"/"special" bez wlasnej kotwicy - zwykle blisko numeru podstawowego
-            base = s.base_date(n, exclude)
+            base = s.base_date(n, exclude, near)
             if base is None:
-                p = self._interpolate(s, n, exclude)
+                p = self._interpolate(s, n, exclude, near)
                 if p is None:
                     return None
                 base = ordinal(p.date_iso)
             return Prediction(iso(base), 7, f"blisko numeru podstawowego {n}")
-        return self._interpolate(s, n, exclude)
+        return self._interpolate(s, n, exclude, near)
 
-    def _near(self, s: _Series, n: int, exclude, side: int) -> list[tuple[int, int]]:
+    def _near(self, s: _Series, n: int, exclude, side: int, near=None) -> list[tuple[int, int]]:
         keys = s.keys()
         pos = bisect_left(keys, n)
         rng = range(pos - 1, -1, -1) if side < 0 else range(pos, len(keys))
@@ -145,7 +151,7 @@ class Calendar:
             k = keys[i]
             if k == n:
                 continue
-            o = s.base_date(k, exclude)
+            o = s.base_date(k, exclude, near)
             if o is None:
                 continue
             out.append((k, o))
@@ -153,9 +159,9 @@ class Calendar:
                 break
         return out
 
-    def _interpolate(self, s: _Series, n: int, exclude) -> Prediction | None:
-        lo = self._near(s, n, exclude, -1)
-        hi = self._near(s, n, exclude, +1)
+    def _interpolate(self, s: _Series, n: int, exclude, near=None) -> Prediction | None:
+        lo = self._near(s, n, exclude, -1, near)
+        hi = self._near(s, n, exclude, +1, near)
         preds, steps = [], []
         for ln, lo_o in lo:
             for hn, hi_o in hi:
@@ -194,14 +200,15 @@ class Calendar:
         return None
 
     # ------------------------------------------------------------ data -> numer
-    def predict_issue(self, title, date_iso, exclude=None) -> tuple[int, str] | None:
+    def predict_issue(self, title, date_iso, exclude=None, near=None) -> tuple[int, str] | None:
         """Numer wydania dla daty - tylko gdy da sie go wskazac jednoznacznie."""
         s = self._series_for(title)
         o = ordinal(date_iso)
         if s is None or o is None:
             return None
         pts = sorted((d, k) for k in s.keys()
-                     for d in [s.base_date(k, exclude)] if d is not None)
+                     for d in [s.base_date(k, exclude, near if near is not None else o)]
+                     if d is not None)
         if len(pts) < 2:
             return None
         dates = [d for d, _ in pts]
@@ -220,6 +227,17 @@ class Calendar:
 
 
 # ---------------------------------------------------------------- z rekordow
+def near_of(r: dict) -> int | None:
+    """Okres rekordu: polowa roku z nazwy pliku, a bez niego - jego wlasna data."""
+    year = (r.get("name_data") or {}).get("year")
+    if year:
+        try:
+            return _dt.date(int(year), 7, 1).toordinal()
+        except ValueError:
+            pass
+    return ordinal(r.get("date_iso"))
+
+
 def build(records: list[dict], report_entries: list[dict], min_conf: float) -> Calendar:
     """Kotwice: pewne wiersze raportow, rekordy reczne/z raportu/potwierdzone
     i odczyty AI o wysokiej pewnosci bez wlasnych watpliwosci."""
@@ -253,7 +271,8 @@ def check_records(cal: Calendar, records: list[dict]) -> dict:
             continue
         if r.get("cal_filled"):
             continue   # wartosc wzieta z kalendarza nie moze potwierdzac sama siebie
-        p = cal.predict(r.get("title"), r.get("issue_number"), r.get("issue_suffix"), exclude=r)
+        p = cal.predict(r.get("title"), r.get("issue_number"), r.get("issue_suffix"), exclude=r,
+                        near=near_of(r))
         if p is None:
             counts["none"] += 1
             continue

@@ -804,6 +804,14 @@ class App(tk.Tk):
         self._sort_rev[key] = not reverse
 
         def sk(r):
+            if key == "old_name":
+                nd = r.get("name_data") or {}
+                lp = str(nd.get("lp") or "")
+                if lp.isdigit():
+                    # kolekcje: lp liczone od nowa w kazdej dekadzie - najpierw rok z nazwy, potem lp
+                    title = str(nd.get("title") or "").lower()
+                    return (False, (0, title, int(nd.get("year") or 0), int(lp), r.get("old_name", "")))
+                return (False, (1, str(r.get("old_name") or "").lower()))
             if key == "issue":
                 v = naming.format_issue(r.get("issue_number"), r.get("issue_suffix"))
             elif key == "page":
@@ -1342,18 +1350,20 @@ class App(tk.Tk):
             same = [r.get("date_iso") for r in self.records
                     if r is not rec and r.get("date_iso") and not needs_check(r)
                     and calendar_model.issue_int(r.get("issue_number")) == key
+                    and (r.get("name_data") or {}).get("year") == (rec.get("name_data") or {}).get("year")
                     and calendar_model.norm_title(r.get("title")) == calendar_model.norm_title(title)
                     and (r.get("issue_suffix") or "") == (rec.get("issue_suffix") or "")]
             if same:
                 best = max(set(same), key=same.count)
                 return best, issue, f"pozostale strony tego wydania ({same.count(best)} str.)"
-            p = cal.predict(title, issue, rec.get("issue_suffix"), exclude=rec)
+            p = cal.predict(title, issue, rec.get("issue_suffix"), exclude=rec,
+                            near=calendar_model.near_of(rec))
             if p:
                 tol = f", +-{p.tol} dni" if p.tol else ""
                 return p.date_iso, issue, f"kalendarz wydan: {p.basis}{tol}"
             return None
         if date_iso:
-            got = cal.predict_issue(title, date_iso, exclude=rec)
+            got = cal.predict_issue(title, date_iso, exclude=rec, near=calendar_model.near_of(rec))
             if got:
                 return date_iso, got[0], f"kalendarz wydan: {got[1]}"
             return None
@@ -1372,7 +1382,7 @@ class App(tk.Tk):
                     if known(self.records[i]) is not None), None)
         if prev and nxt and nxt[1] - prev[1] == nxt[0] - prev[0]:
             n = prev[1] + (pos - prev[0])
-            p = cal.predict(title, n, None, exclude=rec)
+            p = cal.predict(title, n, None, exclude=rec, near=calendar_model.near_of(rec))
             return (p.date_iso if p else None), n, "sasiednie pliki na liscie + kalendarz wydan"
         return None
 

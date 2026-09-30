@@ -223,6 +223,14 @@ potwierdzają tę datę”.
 Na 3335 pewnych wydaniach France Football kalendarz przewidział datę poprawnie
 w 99,6% przypadków (test „z ukryciem” każdego wydania po kolei).
 
+Numeracja wydań potrafi zaczynać się od nowa (ten sam numer w 1958 i 1968), więc kalendarz
+porównuje numer tylko z pewnymi wydaniami z tego samego okresu (±1,5 roku od roku z nazwy
+pliku albo od odczytanej daty). Tak samo *Sprawdź spójność* liczy osobno dla każdego roku,
+a strony „tego samego wydania” muszą mieć też ten sam rok w nazwie.
+
+Sortowanie po kolumnie *Stara nazwa* ustawia pliki kolekcji wg roku z nazwy, a potem `lp` —
+także gdy `lp` zaczyna się od nowa w każdej dekadzie.
+
 Kalendarz sprawdza wyniki automatycznie po odczycie AI i imporcie raportów; ręcznie:
 *Narzędzia → Sprawdź z kalendarzem wydań*.
 

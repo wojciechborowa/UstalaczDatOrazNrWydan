@@ -145,7 +145,10 @@ def cross_check(records: list[dict]) -> dict:
             continue
         if _numeric_issue(rec) is None:
             continue
-        groups.setdefault(_norm_title(rec), []).append(rec)
+        # osobno dla kazdego roku: numeracja potrafi zaczac sie od nowa, a wtedy jedna
+        # prosta dla calej kolekcji oznaczalaby poprawne rekordy jako podejrzane
+        year = str(rec["date_iso"])[:4]
+        groups.setdefault(f"{_norm_title(rec)} {year}".strip(), []).append(rec)
 
     summary: dict[str, dict] = {}
 

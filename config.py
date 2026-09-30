@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Czytnik wydan AI"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 LEGACY_APP_DIR = Path.home() / ".gazeta_ai"
 

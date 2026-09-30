@@ -5,7 +5,7 @@ dwa niezalezne zrodla: dwa odczyty AI albo odczyt AI i kalendarz wydan.
 """
 from __future__ import annotations
 
-from calendar_model import STRONG_TOL, Calendar, issue_int, norm_suffix
+from calendar_model import STRONG_TOL, Calendar, issue_int, near_of, norm_suffix
 
 
 def _key(date_iso, issue, suffix) -> tuple:
@@ -24,7 +24,8 @@ def fill_from_calendar(cal: Calendar, recs: list[dict]) -> int:
             continue
         has_issue = issue_int(r.get("issue_number")) is not None
         if has_issue and not r.get("date_iso"):
-            p = cal.predict(r.get("title"), r.get("issue_number"), r.get("issue_suffix"), exclude=r)
+            p = cal.predict(r.get("title"), r.get("issue_number"), r.get("issue_suffix"), exclude=r,
+                            near=near_of(r))
             if p and p.tol <= 1:
                 r["date_iso"] = p.date_iso
                 r["cal_filled"] = True
@@ -32,7 +33,7 @@ def fill_from_calendar(cal: Calendar, recs: list[dict]) -> int:
                 r["status"] = "data z kalendarza"
                 n += 1
         elif r.get("date_iso") and not has_issue:
-            got = cal.predict_issue(r.get("title"), r.get("date_iso"), exclude=r)
+            got = cal.predict_issue(r.get("title"), r.get("date_iso"), exclude=r, near=near_of(r))
             if got:
                 r["issue_number"] = str(got[0])
                 r["cal_filled"] = True
@@ -68,7 +69,7 @@ def vote(cal: Calendar, r: dict) -> str:
     title = r.get("title") or first.get("title")
 
     def pred(k):
-        return cal.predict(title, k[1], k[2], exclude=r) if k[1] is not None else None
+        return cal.predict(title, k[1], k[2], exclude=r, near=near_of(r)) if k[1] is not None else None
 
     pa, pb = pred(a), pred(b)
     # para (data, numer) jest "spojna", gdy kalendarz potwierdza ja z mala tolerancja
