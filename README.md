@@ -201,6 +201,10 @@ dzień/miesiąc jest niejasna — obie możliwe daty w uwagach i rekord do spraw
 | szary | jeszcze nieczytane |
 | pomarańczowe tło | niezgodne z kalendarzem wydań albo odstające w walidacji |
 
+Przy rekordzie do sprawdzenia kolumna *Uwagi* zawsze mówi dlaczego (`DO SPRAWDZENIA: …`).
+Po wczytaniu sesji wszystkie kontrole są liczone od nowa. Numer wydania wzięty z nazwy
+pliku uznawany jest za pewny — kontrola „numer odstaje od ciągu” go nie ocenia.
+
 Pewny (zielony) jest rekord poprawiony ręcznie, potwierdzony przez dwa niezależne źródła,
 pewny w zaimportowanym raporcie, zgodny z kalendarzem wydań albo odczytany przez AI
 z pewnością ≥ 0,80 bez żadnych zastrzeżeń. Filtry **„pewne”** i **„do sprawdzenia”**
@@ -362,7 +366,8 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 
 ## Eksport
 
-*Plik → Eksport do CSV / do Excela* zapisuje wszystkie kolumny, jakie program przechowuje:
+*Plik → Eksport do CSV / do Excela* (gdy brakuje biblioteki `openpyxl`, program proponuje
+ją doinstalować albo zapisuje CSV) zapisuje wszystkie kolumny, jakie program przechowuje:
 obok daty i numeru także język, datę w oryginalnym brzmieniu, nazwę miesiąca, informację
 czy rok był nadrukowany, pewność, użyty model, status, uwagi i surową odpowiedź modelu.
 Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.

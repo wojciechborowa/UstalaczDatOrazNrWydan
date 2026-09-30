@@ -29,7 +29,7 @@ import report_import
 import render
 import session as session_io
 import validate
-from verify import VerifyDialog, needs_check, open_external, status_group
+from verify import VerifyDialog, check_reasons, needs_check, open_external, status_group
 from config import (ALL_EXT, APP_DIR, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_DB, COLUMN_MAX, COLUMNS,
                     CONFIG_FILE,
                     FREE_RPM, PROVIDERS, SESSION_EXT, VERIFY_CONFIDENCE,
@@ -594,8 +594,10 @@ class App(tk.Tk):
         issue = naming.format_issue(r.get("issue_number"), r.get("issue_suffix"))
         conf = r.get("confidence")
         note = r.get("note") or ""
-        if r.get("outlier") and r.get("outlier_info"):
-            note = (note + " | " if note else "") + r["outlier_info"]
+        # powod "do sprawdzenia" zawsze widoczny w Uwagach
+        extra = [x for x in check_reasons(r) if x not in note]
+        if extra:
+            note = (note + " | " if note else "") + "DO SPRAWDZENIA: " + "; ".join(extra)
         return (
             CHECK_ON if r.get("checked") else CHECK_OFF,
             r.get("old_name", ""),
@@ -851,6 +853,7 @@ class App(tk.Tk):
             f"Model:       {r.get('model')}",
             f"Status:      {r.get('status')}",
             f"Uwagi:       {r.get('note')}",
+            f"Do sprawdz.: {'; '.join(check_reasons(r)) or '-'}",
         ]
         if r.get("outlier"):
             lines.append(f"PODEJRZANE:  {r.get('outlier_info')}")
@@ -1763,7 +1766,9 @@ class App(tk.Tk):
                 self.apply_name_data(r)   # sesje ze starszej wersji programu
             self.compute_name(r)
         missing = sum(1 for r in self.records if not Path(r.get("path", "")).exists())
-        self.refresh_tree()
+        # wyniki kontroli zapisane w sesji moga pochodzic ze starszej wersji programu
+        validate.cross_check(self.records)
+        self.apply_calendar()
         self.autofit_columns()
         self.mark_dirty(False)
         self._remember_session(path)
@@ -1835,12 +1840,56 @@ class App(tk.Tk):
             return
         try:
             export.export_xlsx(path, self.records, progress=self._export_prog)
+        except ImportError:
+            if not self._install_openpyxl():
+                csv_path = str(Path(path).with_suffix(".csv"))
+                if messagebox.askyesno(APP_NAME, "Nie udalo sie przygotowac eksportu do Excela.\n"
+                                                 f"Zapisac zamiast tego plik CSV (Excel go otworzy)?\n\n{csv_path}"):
+                    export.export_csv(csv_path, self.records, progress=self._export_prog)
+                    self.clear_progress()
+                    messagebox.showinfo(APP_NAME, f"Zapisano {len(self.records)} wierszy:\n{csv_path}")
+                return
+            try:
+                export.export_xlsx(path, self.records, progress=self._export_prog)
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Blad eksportu:\n{exc}")
+                return
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Blad eksportu:\n{exc}")
             return
         self.clear_progress()
         self.log(f"Eksport XLSX: {path}")
         messagebox.showinfo(APP_NAME, f"Zapisano {len(self.records)} wierszy:\n{path}")
+
+    def _install_openpyxl(self) -> bool:
+        """Brak biblioteki do plikow .xlsx - proponujemy doinstalowanie (pip)."""
+        if not messagebox.askyesno(APP_NAME, "Do eksportu do Excela potrzebna jest biblioteka "
+                                             "'openpyxl', ktorej brakuje.\n\nZainstalowac ja teraz? "
+                                             "(potrzebny internet, zwykle kilkanascie sekund)"):
+            return False
+        import importlib
+        import subprocess
+        self.set_status("Instaluje openpyxl...")
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            res = subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl"],
+                                 capture_output=True, text=True, timeout=300)
+            ok = res.returncode == 0
+            if not ok:
+                self.log("pip install openpyxl: " + (res.stderr or res.stdout)[-800:])
+        except Exception as exc:
+            ok = False
+            self.log(f"pip install openpyxl: {exc}")
+        finally:
+            self.config(cursor="")
+        if ok:
+            importlib.invalidate_caches()
+            self.log("Zainstalowano openpyxl.")
+            return True
+        messagebox.showwarning(APP_NAME, "Instalacja sie nie udala. Mozesz sprobowac recznie w konsoli:\n"
+                                         "pip install openpyxl\n\nSzczegoly w zakladce Log.")
+        return False
 
     def _export_prog(self, i, total):
         self.set_progress(i, total, "Eksport")

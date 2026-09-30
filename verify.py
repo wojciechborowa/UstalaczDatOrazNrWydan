@@ -51,6 +51,43 @@ def needs_check(r: dict) -> bool:
     return conf is None or conf < VERIFY_CONFIDENCE
 
 
+def check_reasons(r: dict) -> list[str]:
+    """Dlaczego rekord jest do sprawdzenia - krotko, do kolumny Uwagi i paneli."""
+    if not needs_check(r):
+        return []
+    st = (r.get("status") or "").lower()
+    out = []
+    if r.get("report_flag"):
+        out.append("raport oznaczyl jako watpliwe")
+    if r.get("vote_conflict"):
+        out.append("zrodla podaja rozne daty")
+    if r.get("cal_filled"):
+        out.append("wartosc z kalendarza wydan - do potwierdzenia")
+    if r.get("cal_state") == "conflict":
+        out.append(r.get("cal_info") or "niezgodne z kalendarzem wydan")
+    if r.get("group_conflict") or r.get("chrono_flag"):
+        out.append(r.get("chrono_info") or "niezgodne z innymi stronami / chronologia")
+    if r.get("year_mismatch"):
+        out.append("rok na skanie inny niz w nazwie pliku")
+    if r.get("name_unconfirmed"):
+        out.append("data z nazwy niepotwierdzona odczytem")
+    if "blad" in st:
+        out.append("blad odczytu")
+    elif st.startswith("brak danych"):
+        out.append("brak danych")
+    if not r.get("name_complete", bool(r.get("new_name"))):
+        out.append("niekompletna nazwa")
+    if r.get("outlier") and r.get("outlier_info"):
+        out.append(r["outlier_info"])
+    if "niejednoznaczna" in (r.get("note") or ""):
+        out.append("data niejednoznaczna")
+    conf = r.get("confidence")
+    if not out:
+        out.append("brak pewnosci modelu" if conf is None
+                   else f"niska pewnosc modelu ({conf:.2f} < {VERIFY_CONFIDENCE:.2f})")
+    return out
+
+
 # Grupy stanu - te same kolory w tabeli i na pasku kolekcji.
 GROUP_COLORS = {
     "certain": "#2e8b3e",   # pewne - mozna zmieniac nazwy
@@ -250,9 +287,9 @@ class VerifyDialog(tk.Toplevel):
             info.append(f"pewnosc {r['confidence']:.2f}")
         if r.get("note"):
             info.append(str(r["note"]))
-        for k in ("outlier_info", "cal_info", "chrono_info"):
-            if r.get(k):
-                info.append(str(r[k]))
+        reasons = check_reasons(r)
+        if reasons:
+            info.append("do sprawdzenia: " + "; ".join(reasons))
         self.lbl_info.config(text="  |  ".join(info))
         for key in ("issue_number", "issue_suffix", "title"):
             val = r.get(key)
