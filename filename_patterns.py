@@ -11,7 +11,8 @@ Pola:
     {mm}     miesiac, cyfry (albo "mm" - nieznany)
     {dd}     dzien, cyfry (albo "dd" - nieznany)
     {nr}     numer wydania, cyfry, opcjonalnie z dowolnym dopiskiem (A, B, bis, s, special...)
-    {str}    numer strony, cyfry, opcjonalnie z "-OST" (ostatnia strona)
+    {str}    numer strony, cyfry, opcjonalnie z dopiskiem literowym ("-OST" = ostatnia strona,
+             "-ORG" itp. - dopisek jest pomijany)
     {*}      cokolwiek - pomijane
 
 Spacje we wzorcu dopasowuja sie do dowolnej liczby spacji (takze zadnej).
@@ -33,7 +34,7 @@ FIELDS = {
     "dd": r"(?P<dd>\d{1,2}|dd|xx)",
     # numer + dowolny dopisek do nastepnego separatora: 023093A, 022025 bis, 010203s, 023100-2
     "nr": r"(?P<nr>\d{1,7}|n{3,7}|x{3,7})(?P<sfx>[^\\/]*?)",
-    "str": r"(?P<str>\d{1,4})(?:[ -]?(?P<ost>ost))?",
+    "str": r"(?P<str>\d{1,4})(?:[ -]?(?P<ost>[a-z]{1,6}))?",
     "*": r".*?",
 }
 _TOKEN = re.compile(r"\{([^{}]*)\}")
@@ -146,7 +147,7 @@ def parse(filename: str, patterns: list[Pattern]) -> dict | None:
             "issue": issue,
             "suffix": sfx,
             "page": str(int(page)) if page and page.isdigit() else None,
-            "ost": bool(g.get("ost")),
+            "ost": (g.get("ost") or "").lower() == "ost",
             "date_span": span,
             "name_date": name_date,
         }
