@@ -547,6 +547,33 @@ class App(tk.Tk):
         elif elapsed is not None:
             self.lbl_time.config(text=f"uplynelo {fmt_time(elapsed)}")
 
+    def _run_bg(self, op: str, work, on_done):
+        """Dlugie zadanie w watku tla: pasek postepu zyje, okno nie zamarza.
+        work(progress) -> wynik; on_done(wynik, wyjatek) wola sie w watku GUI."""
+        if getattr(self, "_bg_busy", False):
+            messagebox.showinfo(APP_NAME, "Trwa inna operacja - poczekaj, az sie skonczy.")
+            return False
+        self._bg_busy = True
+        self._bg_op = op
+        t0 = time.time()
+        self.set_progress(0, 1, op)
+
+        def prog(i, total):
+            step = max(1, total // 200)
+            if i % step == 0 or i == total:
+                self.queue.put(("bg_progress", {"done": i, "total": total, "op": op,
+                                                "elapsed": time.time() - t0}))
+
+        def run():
+            try:
+                res, err = work(prog), None
+            except Exception as exc:  # noqa: BLE001
+                res, err = None, exc
+            self.queue.put(("bg_done", {"cb": on_done, "res": res, "err": err}))
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
     def clear_progress(self):
         self.pb["value"] = 0
         self.lbl_pct.config(text="0%")
@@ -564,9 +591,19 @@ class App(tk.Tk):
         if not folder:
             return
         base = Path(folder)
-        it = base.rglob("*") if recursive else base.glob("*")
-        found = [p for p in it if p.is_file() and p.suffix.lower() in ALL_EXT]
-        self._add_paths(found)
+        self.set_status("Skanowanie folderu...")
+
+        def work(prog):
+            it = base.rglob("*") if recursive else base.glob("*")
+            return [p for p in it if p.is_file() and p.suffix.lower() in ALL_EXT]
+
+        def done(found, err):
+            if err:
+                messagebox.showerror(APP_NAME, f"Blad skanowania folderu:\n{err}")
+                return
+            self._add_paths(found)
+
+        self._run_bg("Skanowanie", work, done)
 
     def add_files(self):
         paths = filedialog.askopenfilenames(
@@ -577,6 +614,9 @@ class App(tk.Tk):
             self._add_paths([Path(p) for p in paths])
 
     def _add_paths(self, paths: list[Path]):
+        if getattr(self, "_bg_busy", False):
+            messagebox.showinfo(APP_NAME, "Trwa inna operacja - poczekaj, az sie skonczy.")
+            return
         existing = {r["path"] for r in self.records}
         new = [p for p in sorted(paths) if str(p) not in existing]
         if not new:
@@ -593,25 +633,34 @@ class App(tk.Tk):
         total = len(new)
         patterns = self.patterns()
         added = []
-        for i, p in enumerate(new, start=1):
-            r = make_record(p)
-            self.apply_name_data(r, patterns)
-            self.records.append(r)
-            added.append(r)
-            if i % 50 == 0 or i == total:
-                self.set_progress(i, total, "Import")
-                self.update_idletasks()
-        self.log(f"Dodano {total} plikow (lacznie {len(self.records)}). "
-                 f"Wzorce nazw: {self.pattern_summary(added)}")
-        self.clear_progress()
-        self.refresh_tree()
-        self.mark_dirty()
-        self.autofit_columns()
-        self.set_status(f"{len(self.records)} plikow na liscie. Wzorce nazw: "
-                        f"{self.pattern_summary(added)}")
-        if self.report_index.sources:
-            # wczytane wczesniej raporty od razu obejmuja tez nowe pliki
-            self._run_report_job([], quiet=True)
+        self._bg_busy = True
+        t0 = time.time()
+
+        def step(start: int):
+            end = min(start + 40, total)
+            for p in new[start:end]:
+                r = make_record(p)
+                self.apply_name_data(r, patterns)
+                self.records.append(r)
+                added.append(r)
+            self.set_progress(end, total, "Import", time.time() - t0)
+            if end < total:
+                self.after(1, lambda: step(end))
+                return
+            self._bg_busy = False
+            self.log(f"Dodano {total} plikow (lacznie {len(self.records)}). "
+                     f"Wzorce nazw: {self.pattern_summary(added)}")
+            self.clear_progress()
+            self.refresh_tree()
+            self.mark_dirty()
+            self.autofit_columns()
+            self.set_status(f"{len(self.records)} plikow na liscie. Wzorce nazw: "
+                            f"{self.pattern_summary(added)}")
+            if self.report_index.sources:
+                # wczytane wczesniej raporty od razu obejmuja tez nowe pliki
+                self._run_report_job([], quiet=True)
+
+        self.after(1, lambda: step(0))
 
     def remove_checked(self):
         keep = [r for r in self.records if not r.get("checked")]
@@ -1355,7 +1404,13 @@ class App(tk.Tk):
         self.after(120, self.poll_queue)
 
     def _handle_event(self, kind: str, data: dict):
-        if kind == "report_progress":
+        if kind == "bg_progress":
+            self.set_progress(data["done"], data["total"], data["op"], data["elapsed"])
+        elif kind == "bg_done":
+            self._bg_busy = False
+            self.clear_progress()
+            data["cb"](data["res"], data["err"])
+        elif kind == "report_progress":
             self.set_progress(data["done"], data["total"], data["op"])
         elif kind == "report_loaded":
             self._reports_loaded(data)
@@ -1714,7 +1769,16 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "W wybranym zakresie nie ma plikow do zmiany nazwy.")
             return
 
-        plan, skipped = rename_ops.plan_renames(todo, self.var_title_override.get().strip())
+        override = self.var_title_override.get().strip()
+        self.set_status("Planowanie zmiany nazw...")
+        self._run_bg("Planowanie", lambda prog: rename_ops.plan_renames(todo, override),
+                     lambda res, err: self._rename_planned(res, err))
+
+    def _rename_planned(self, res, err):
+        if err:
+            messagebox.showerror(APP_NAME, f"Blad planowania:\n{err}")
+            return
+        plan, skipped = res
         if not plan:
             messagebox.showinfo(APP_NAME, f"Nie ma czego zmieniac.\n"
                                           f"Pominietych: {len(skipped)}.")
@@ -1730,19 +1794,19 @@ class App(tk.Tk):
                 f"Operacja zostanie zapisana w logu i bedzie mozna ja cofnac."):
             return
 
-        def prog(i, total):
-            self.set_progress(i, total, "Zmiana nazw")
-            if i % 20 == 0:
-                self.update_idletasks()
+        def done(res2, err2):
+            self.refresh_tree()
+            self.mark_dirty()
+            if err2:
+                messagebox.showerror(APP_NAME, f"Blad zmiany nazw:\n{err2}")
+                return
+            log_path, done_l, errors = res2
+            self.log(f"Zmieniono nazwy: {len(done_l)}, bledow: {len(errors)}. Log: {log_path}")
+            messagebox.showinfo(APP_NAME,
+                                f"Zmieniono nazwy: {len(done_l)}\nBledy: {len(errors)}\n"
+                                f"Pominiete: {len(skipped)}\n\nLog operacji:\n{log_path}")
 
-        log_path, done, errors = rename_ops.apply_renames(plan, progress=prog)
-        self.clear_progress()
-        self.refresh_tree()
-        self.mark_dirty()
-        self.log(f"Zmieniono nazwy: {len(done)}, bledow: {len(errors)}. Log: {log_path}")
-        messagebox.showinfo(APP_NAME,
-                            f"Zmieniono nazwy: {len(done)}\nBledy: {len(errors)}\n"
-                            f"Pominiete: {len(skipped)}\n\nLog operacji:\n{log_path}")
+        self._run_bg("Zmiana nazw", lambda prog: rename_ops.apply_renames(plan, progress=prog), done)
 
     def undo_rename(self):
         logs = rename_ops.list_logs()
@@ -1752,20 +1816,21 @@ class App(tk.Tk):
         UndoDialog(self, logs, self._do_undo)
 
     def _do_undo(self, log_path: Path):
-        def prog(i, total):
-            self.set_progress(i, total, "Cofanie")
-            if i % 20 == 0:
-                self.update_idletasks()
+        def done(res, err):
+            self.refresh_tree()
+            self.mark_dirty()
+            if err:
+                messagebox.showerror(APP_NAME, f"Blad cofania:\n{err}")
+                return
+            restored, errors = res
+            self.log(f"Cofnieto {restored} zmian nazw, bledow: {len(errors)}.")
+            msg = f"Cofnieto: {restored}\nBledy: {len(errors)}"
+            if errors:
+                msg += "\n\n" + "\n".join(f"{Path(e['dst']).name}: {e['error']}" for e in errors[:8])
+            messagebox.showinfo(APP_NAME, msg)
 
-        restored, errors = rename_ops.undo_renames(log_path, self.records, progress=prog)
-        self.clear_progress()
-        self.refresh_tree()
-        self.mark_dirty()
-        self.log(f"Cofnieto {restored} zmian nazw, bledow: {len(errors)}.")
-        msg = f"Cofnieto: {restored}\nBledy: {len(errors)}"
-        if errors:
-            msg += "\n\n" + "\n".join(f"{Path(e['dst']).name}: {e['error']}" for e in errors[:8])
-        messagebox.showinfo(APP_NAME, msg)
+        self._run_bg("Cofanie", lambda prog: rename_ops.undo_renames(
+            log_path, self.records, progress=prog), done)
 
     # =============================================================== sesje
     def _confirm_discard(self) -> bool:
