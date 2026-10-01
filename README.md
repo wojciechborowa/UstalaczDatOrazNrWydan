@@ -288,6 +288,17 @@ Przycisk *Otwórz w przeglądarce PDF* otwiera plik w programie systemowym.
 - Wczytane raporty CSV obejmują też pliki dodane później — nie trzeba ich importować
   ponownie.
 
+## Raport HTML i podsumowanie przelotu
+
+Po zakończeniu odczytu program pokazuje podsumowanie: ile plików odczytano pewnie, ile do sprawdzenia, ile z błędem,
+czas odczytu AI, czas na plik oraz **ile czasu zaoszczędzono** w porównaniu z pracą ręczną. Stamtąd (albo z menu
+*Narzędzia → Raport HTML z tej sesji…*) można wygenerować raport HTML: jeden samodzielny plik, wyśrodkowany,
+przygotowany pod zrzut ekranu. Działa też dla wczytanej, wcześniej zapisanej sesji.
+
+- Czas ręczny to założenie (domyślnie 30 s na plik) i czas kontroli pliku „do sprawdzenia" (20 s) - oba można zmienić w oknie raportu.
+- Czas odczytu AI jest zapisywany w sesji od tej wersji. W starszych sesjach brak go - raport pokaże szacunek (oznaczony) albo wpiszesz czas ręcznie.
+- Ścieżki folderów nie trafiają do raportu; nazwy plików wymagających uwagi tylko po zaznaczeniu opcji.
+
 ## Zmiana nazw
 
 *Zmień nazwy* pyta o zakres: **tylko pewne** (domyślnie), tylko zaznaczone, tylko

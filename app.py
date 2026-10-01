@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import queue
 import sys
+import webbrowser
 import re
 import threading
 import time
@@ -26,6 +27,7 @@ import rename_ops
 import updater
 import report_import
 import render
+import report_html
 import session as session_io
 import usage
 from verify import VerifyDialog, check_reasons, needs_check, open_external, status_group
@@ -106,6 +108,7 @@ class App(tk.Tk):
         self.by_iid: dict[str, dict] = {}
         self._iid_seq = 0
         self.session_path: str | None = None
+        self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0}
         self.dirty = False
 
         self.worker: ReadWorker | None = None
@@ -201,6 +204,7 @@ class App(tk.Tk):
         t.add_command(label="Cache odczytow: rozmiar i czyszczenie...", command=self.clear_cache)
         t.add_command(label="Zuzycie limitow AI (liczniki programu)", command=self.show_usage)
         t.add_command(label="Statystyki", command=self.show_stats)
+        t.add_command(label="Raport HTML z tej sesji...", command=self.make_report)
         m.add_cascade(label="Narzedzia", menu=t)
 
         w = tk.Menu(m, tearoff=0)
@@ -1454,6 +1458,12 @@ class App(tk.Tk):
                    f"z cache {data['from_cache']}, czas {fmt_time(data['elapsed'])}.")
             self.log(msg)
             self.set_status(msg)
+            rs = self.run_stats
+            rs["ai_seconds"] = float(rs.get("ai_seconds") or 0) + float(data["elapsed"])
+            rs["ai_sent"] = int(rs.get("ai_sent") or 0) + int(data["done"])
+            rs["ai_cache"] = int(rs.get("ai_cache") or 0) + int(data["from_cache"])
+            rs["runs"] = int(rs.get("runs") or 0) + 1
+            self.mark_dirty()
             self.recompute_all_names()
             self.autofit_columns()
             self._refresh_usage()
@@ -1472,6 +1482,8 @@ class App(tk.Tk):
                 left = sum(1 for r in self.records if needs_check(r))
                 green = sum(1 for r in self.records if status_group(r) == "certain")
                 self.set_status(msg + f" Zielone: {green}, do weryfikacji: {left}.")
+                if not data["stopped"] and data["done"] + data["from_cache"] > 0:
+                    self.after(300, self.show_run_summary)
         elif kind == "thumb":
             if data["token"] == self._thumb_token:
                 from PIL import ImageTk
@@ -1852,6 +1864,7 @@ class App(tk.Tk):
         self.records = []
         self.session_path = None
         self.session_patterns = []
+        self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0}
         self.mode, self.page_index = choice
         self._update_mode_label()
         self.refresh_tree()
@@ -1938,6 +1951,8 @@ class App(tk.Tk):
         if meta.get("title_override"):
             self.var_title_override.set(meta["title_override"])
         self.session_patterns = list(meta.get("patterns") or [])
+        self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0,
+                          **(meta.get("run_stats") or {})}
         mode = meta.get("mode")
         page = int(meta.get("page") or 1) - 1
         if mode not in MODES:
@@ -2024,6 +2039,7 @@ class App(tk.Tk):
                 "patterns": self.session_patterns, "mode": self.mode or MODE_ISSUES,
                 "page": self.page_index + 1,
                 "title_override": self.var_title_override.get(),
+                "run_stats": self.run_stats,
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
             session_io.save_session(path, self.records, meta)
@@ -2130,6 +2146,63 @@ class App(tk.Tk):
             return
         removed = cache_db.clear()
         self.log(f"Wyczyszczono cache ({removed} wpisow).")
+
+    # =============================================================== raport HTML
+    def _report_stats(self, collection: str, manual: float, review: float,
+                      ai_seconds: float | None) -> dict:
+        return report_html.collect_stats(
+            self.records, self.run_stats, collection=collection, manual_sec=manual,
+            review_sec=review, ai_seconds=ai_seconds, mode_label=MODES.get(self.mode, ""))
+
+    def show_run_summary(self):
+        """Podsumowanie po przelocie: wyniki, czas i oszczednosc - z opcja raportu HTML."""
+        if not self.records:
+            return
+        st = self._report_stats("", float(self.cfg.get("manual_sec") or report_html.DEFAULT_MANUAL_SEC),
+                                float(self.cfg.get("review_sec") or report_html.DEFAULT_REVIEW_SEC), None)
+        est = " (szacunek)" if st["ai_estimated"] else ""
+        txt = (f"Przetworzono: {st['processed']} z {st['total']} plikow\n"
+               f"  odczytane pewnie:   {st['ok']}  ({st['success_pct']:.0f}%)\n"
+               f"  do sprawdzenia:     {st['check']}\n"
+               f"  bledy odczytu:      {st['error']}\n"
+               f"  nieodczytane:       {st['unread']}\n\n"
+               f"Czas odczytu AI:      {fmt_time(st['ai_seconds'])}{est}"
+               f"  ({st['per_file']:.1f} s na plik)\n"
+               f"Recznie zajeloby:     {fmt_time(st['manual_total'])}\n"
+               f"Z programem:          {fmt_time(st['with_program'])}\n\n"
+               f"OSZCZEDZONO:          {fmt_time(st['saved'])}  ({st['saved_pct']:.0f}%)\n\n"
+               "Wygenerowac raport HTML (do zrzutu ekranu)?")
+        if messagebox.askyesno(APP_NAME + " - podsumowanie przelotu", txt):
+            self.make_report()
+
+    def make_report(self):
+        if not self.records:
+            messagebox.showinfo(APP_NAME, "Lista jest pusta - nie ma z czego zrobic raportu.")
+            return
+        ReportDialog(self, report_html.guess_collection(self.records), self.cfg,
+                     self.run_stats.get("ai_seconds") or None, self._build_report)
+
+    def _build_report(self, collection: str, manual: float, review: float,
+                      ai_seconds: float | None, with_names: bool):
+        self.cfg["manual_sec"], self.cfg["review_sec"] = manual, review
+        save_config(self.cfg)
+        st = self._report_stats(collection, manual, review, ai_seconds)
+        page = report_html.build_html(
+            st, report_html.flagged_list(self.records) if with_names else None)
+        safe = re.sub(r'[<>:"/\\|?*]+', "", collection).strip() or "kolekcja"
+        path = filedialog.asksaveasfilename(
+            title="Zapisz raport HTML", defaultextension=".html", initialdir=self._session_dir(),
+            initialfile=f"Raport - {safe} - {time.strftime('%Y-%m-%d')}.html",
+            filetypes=[("Raport HTML", "*.html")])
+        if not path:
+            return
+        try:
+            Path(path).write_text(page, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Nie udalo sie zapisac raportu:\n{exc}")
+            return
+        self.log(f"Zapisano raport HTML: {path}")
+        webbrowser.open(Path(path).resolve().as_uri())
 
     def show_stats(self):
         total = len(self.records)
@@ -2643,6 +2716,64 @@ class PatternsDialog(tk.Toplevel):
         self.destroy()
         self.on_ok(self.items)
 
+
+
+class ReportDialog(tk.Toplevel):
+    """Ustawienia raportu HTML: nazwa kolekcji, zalozenia czasowe, opcjonalna lista plikow."""
+
+    def __init__(self, parent, collection: str, cfg: dict, ai_seconds, on_ok):
+        super().__init__(parent)
+        self.title("Raport HTML z sesji")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.on_ok = on_ok
+        self.v_col = tk.StringVar(value=collection)
+        self.v_manual = tk.StringVar(value=str(cfg.get("manual_sec") or report_html.DEFAULT_MANUAL_SEC))
+        self.v_review = tk.StringVar(value=str(cfg.get("review_sec") or report_html.DEFAULT_REVIEW_SEC))
+        self.v_ai = tk.StringVar(value=fmt_time(ai_seconds) if ai_seconds else "")
+        self.v_names = tk.BooleanVar(value=False)
+        f = ttk.Frame(self, padding=14)
+        f.pack(fill="both", expand=True)
+        rows = [("Nazwa kolekcji:", self.v_col, 38),
+                ("Czas reczny na 1 plik (s):", self.v_manual, 8),
+                ("Czas kontroli 1 pliku 'do sprawdzenia' (s):", self.v_review, 8),
+                ("Czas odczytu AI (gg:mm:ss; puste = szacunek):", self.v_ai, 10)]
+        for i, (lab, var, w) in enumerate(rows):
+            ttk.Label(f, text=lab).grid(row=i, column=0, sticky="w", pady=3, padx=(0, 10))
+            ttk.Entry(f, textvariable=var, width=w).grid(row=i, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(f, text="Dolacz liste plikow wymagajacych uwagi (nazwy plikow)",
+                        variable=self.v_names).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
+        ttk.Label(f, foreground="#666", wraplength=420, justify="left",
+                  text="Sciezki folderow nie trafiaja do raportu. Czas reczny to zalozenie: "
+                       "otwarcie skanu, odczyt daty i numeru, wpisanie nazwy.").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 10))
+        bt = ttk.Frame(f)
+        bt.grid(row=6, column=0, columnspan=2, sticky="e")
+        ttk.Button(bt, text="Generuj raport", command=self._ok).pack(side="left", padx=4)
+        ttk.Button(bt, text="Anuluj", command=self.destroy).pack(side="left")
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.grab_set()
+
+    def _ok(self):
+        try:
+            manual = float(self.v_manual.get().replace(",", "."))
+            review = float(self.v_review.get().replace(",", "."))
+            t = self.v_ai.get().strip()
+            ai = None
+            if t:
+                parts = [int(x) for x in t.split(":")]
+                while len(parts) < 3:
+                    parts.insert(0, 0)
+                ai = parts[0] * 3600 + parts[1] * 60 + parts[2]
+            if manual <= 0 or review < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning(APP_NAME, "Sprawdz liczby: czasy w sekundach, czas AI jako gg:mm:ss.",
+                                   parent=self)
+            return
+        col, names = self.v_col.get().strip(), self.v_names.get()
+        self.destroy()
+        self.on_ok(col or "Kolekcja skanow", manual, review, ai, names)
 
 class RenameDialog(tk.Toplevel):
     """Zakres zmiany nazw: pewne / zaznaczone / widoczne / pewne widoczne."""
