@@ -1633,6 +1633,13 @@ class App(tk.Tk):
                 r["issue_number"], r["issue_suffix"] = nd["issue"], nd.get("suffix")
             if nd.get("page"):
                 r["page_number"] = nd["page"]
+        elif nd and self.mode == MODE_PAGES and "recznie" not in st:
+            # kolekcja stron: numer wydania i strona sa w nazwie pliku - ona wygrywa
+            # z odczytem AI i ze starymi danymi sesji (np. sprzed poprawki wzorca -ORG)
+            if nd.get("issue"):
+                r["issue_number"], r["issue_suffix"] = nd["issue"], nd.get("suffix")
+            if nd.get("page"):
+                r["page_number"] = nd["page"]
         self.assess(r)
         self.compute_name(r)
 
