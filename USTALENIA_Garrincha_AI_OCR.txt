@@ -1,0 +1,61 @@
+USTALENIA Z SESJI: wyszukiwanie wzmianek o Garrinchy na skanach gazet (AI / OCR)
+==============================================================================
+
+Cel
+---
+Czy program, który pyta model AI o daty i numery wydań, można rozszerzyć o pytanie:
+"czy na skanie jest coś o Garrinchy (Garrincha / Gualicho) i w jakim kontekście?"
+(z przytoczeniem tekstu, nagłówka, relacji).
+
+Próbka testowa
+--------------
+Jornal do Brasil, Rio de Janeiro, quinta-feira, 9 czerwca 1955 (3. caderno, Esportes).
+Zielone zaznaczenia przy nazwisku w artykule o meczu Botafogo - Reims 5:1.
+
+Najważniejsze wnioski
+---------------------
+1. Funkcja jest wykonalna technicznie - to ten sam mechanizm co dziś (obraz + inny prompt).
+2. Decyduje rozdzielczość, nie model:
+   - Cały arkusz (dwie strony) w 1500x1035 px: model widzi nagłówki i układ strony,
+     ale NIE odczyta tekstu artykułów. Może tylko wskazać miejsca zielonych zaznaczeń
+     i zgadywać kontekst. Cytat z takiego skanu byłby zmyślony.
+   - Wycinek jednej kolumny/artykułu w wyższej rozdzielczości: tekst jest czytelny
+     i model podaje poprawny kontekst oraz cytaty.
+3. OCR (Tesseract, język por) na skanie 1500x1035 NIE działa: nie znalazł nawet
+   "Botafogo" ani "Reims" z nagłówka, a kolumna artykułu (wycięta, powiększona 4x)
+   dała same śmieci. Powiększanie nie odtwarza utraconych szczegółów.
+4. Pliki 7.jpg i 8.jpg były identyczne (1500x1035, 483 KB) - możliwe, że czat
+   zmniejsza obraz. Rozdzielczość oryginału trzeba sprawdzić we właściwościach pliku.
+5. Ryzyko halucynacji: model zna Garrinchę i Botafogo z 1955/56, więc przy nieczytelnym
+   tekście może "znaleźć" go z pamięci. Prompt musi wymagać dosłownego cytatu
+   i miejsca w tekście albo odpowiedzi "brak".
+
+Wynik na czytelnym wycinku (Botafogo - Reims 5:1, relacja Agencji U.P.)
+-----------------------------------------------------------------------
+Tytuł: "BELO TRIUNFO ALCANÇADO PELO BOTAFOGO SOBRE O CAMPEÃO FRANCÊS"
+Garrincha pojawia się w:
+ - składzie Botafogo (Lugano; Orlando Maia, Nilton Santos; Bob, Tomé, Juvenal;
+   Garrincha, Paulinho, Vinicius, Dino, Hélio),
+ - akcji przy pierwszym golu Dino (26. min, 1x0),
+ - rzucie karnym (42. min) - Garrincha wykonywał, bramkarz obronił na róg,
+ - golu na 4x1 (strzelił Garrincha po podaniu Paulinho),
+ - akcji przy piątym golu Paulinho (5x1).
+(Pojedyncze słowa poza nazwiskiem mogą mieć drobne błędy odczytu.)
+
+Zalecany plan wdrożenia
+-----------------------
+1. Skany w pełnej rozdzielczości (oryginały z archiwum, np. Hemeroteca Digital BN),
+   nie zrzuty ekranu.
+2. Cięcie strony na kafelki (np. 3x3 lub per kolumna) z zakładką, bo API modelu
+   zmniejsza zbyt duże obrazy; każdy kafelek osobno do modelu.
+3. Prompt: szukaj Garrincha / Gualicho (i warianty: Garrinch*, Gualich*, Mané),
+   zwróć dosłowny cytat, nagłówek/artykuł i położenie, albo "brak".
+4. Opcjonalnie OCR jako pierwszy filtr (Tesseract por + wyszukiwanie z tolerancją
+   na literówki), a do modelu wysyłać tylko wycinki z trafieniem - taniej i mniej
+   zmyśleń. Działa tylko przy dobrej rozdzielczości.
+5. Wyniki oznaczać jako wymagające weryfikacji człowieka, spójnie z istniejącym
+   kolorowaniem pewności w programie.
+
+Status
+------
+Tylko analiza i testy na próbkach; w kodzie programu nie wprowadzono zmian.
