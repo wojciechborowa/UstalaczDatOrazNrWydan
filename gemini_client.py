@@ -29,6 +29,31 @@ _SKIP = re.compile(r"embedding|aqa|tts|audio|image-generation|imagen|veo|live|ro
                    r"computer-use|native-audio|learnlm|gemma", re.I)
 
 
+def model_kind(name: str, methods: list[str]) -> str:
+    """Rodzaj modelu wg nazwy i obslugiwanych metod: obrazy / tekst / audio / embeddings /
+    generowanie (obrazu, wideo) / inne. To heurystyka - lista Google nie podaje modalnosci."""
+    n = name.lower()
+    if "embedding" in n or "aqa" in n or "embedContent" in methods:
+        return "embeddings"
+    if re.search(r"tts|audio|live|native-audio", n):
+        return "audio"
+    if re.search(r"imagen|image-generation|veo|-image", n):
+        return "generowanie"
+    if "generateContent" not in methods:
+        return "inne"
+    if re.search(r"gemma|learnlm", n):
+        return "tekst"
+    if re.search(r"robotics|computer-use", n):
+        return "inne"
+    return "obrazy" if n.startswith("gemini") else "tekst"
+
+
+def is_free_guess(name: str) -> bool:
+    """Gemini nie podaje ceny w liscie modeli - zgadujemy po nazwie (Flash, Flash-Lite i Gemma
+    maja darmowy plan; Pro zwykle nie albo z bardzo malym limitem)."""
+    return bool(re.search(r"flash|gemma", name.lower()))
+
+
 def model_rank(name: str) -> tuple:
     """Kolejnosc na liscie: najpierw tanie flash-lite, potem flash, potem reszta."""
     n = name.lower()
@@ -64,19 +89,22 @@ class GeminiClient(BaseClient):
                 break
         return out
 
-    def vision_models(self) -> list[dict]:
-        models = []
+    def models(self, kind: str = "obrazy") -> list[dict]:
+        """Modele z listy Google z dopisanym rodzajem (m['kind']); kind='wszystkie' = bez filtra."""
+        out = []
         for m in self.list_models():
-            methods = m.get("supportedGenerationMethods") or []
             name = str(m.get("name", "")).replace("models/", "")
-            if "generateContent" not in methods or not name.startswith("gemini"):
-                continue
-            if _SKIP.search(name):
+            if not name:
                 continue
             m["id"] = name
-            models.append(m)
-        models.sort(key=lambda m: model_rank(m["id"]))
-        return models
+            m["kind"] = model_kind(name, m.get("supportedGenerationMethods") or [])
+            if kind == "wszystkie" or m["kind"] == kind:
+                out.append(m)
+        out.sort(key=lambda m: model_rank(m["id"]))
+        return out
+
+    def vision_models(self) -> list[dict]:
+        return self.models("obrazy")
 
     def key_info(self) -> dict:
         """Test klucza - Gemini nie podaje limitow przez API, wiec sprawdzamy dostep."""

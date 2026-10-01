@@ -19,7 +19,7 @@ Przy nowej sesji (i przy dodaniu pierwszych plików) program pyta o tryb:
 | **Kolekcja wydań** | PDF-y z całymi wydaniami | tytuł, datę i numer wydania — z wybranej strony PDF-a (domyślnie 1.) | to, co nazwa jednoznacznie zawiera — tylko do porównania |
 | **Kolekcja stron** | skany pojedynczych stron / rozkładówek | **dzień i miesiąc** | tytuł, rok, numer wydania, numer strony |
 
-*Plik → Ustawienia sesji…* (albo przycisk *Ustawienia sesji…* nad tabelą) zmienia tryb
+*Sesja → Ustawienia sesji…* (albo przycisk *Ustawienia sesji…* nad tabelą) zmienia tryb
 i stronę wysyłaną do AI — dla gazet, które datę i numer drukują np. na stronie 3.
 Tryb i strona zapisują się w sesji. Starsza sesja (bez trybu) przy otwarciu pyta o tryb
 z propozycją wg typu plików.
@@ -282,7 +282,7 @@ Przycisk *Otwórz w przeglądarce PDF* otwiera plik w programie systemowym.
 
 ## Sesje
 
-- *Plik → Wczytaj ostatnią sesję* (Ctrl+Shift+O) i *Plik → Ostatnie sesje* (10 ostatnich).
+- *Sesja → Wczytaj ostatnią sesję* (Ctrl+Shift+O) i *Sesja → Ostatnie sesje* (10 ostatnich).
 - *Zapisz sesję jako…* proponuje nazwę `Tytuł - RRRR-MM-DD - GG-MM`, np.
   `France Football - 2026-09-30 - 01-37`, w folderze ostatniej sesji.
 - Wczytane raporty CSV obejmują też pliki dodane później — nie trzeba ich importować
@@ -298,6 +298,13 @@ przygotowany pod zrzut ekranu. Działa też dla wczytanej, wcześniej zapisanej 
 - Czas ręczny to założenie (domyślnie 30 s na plik) i czas kontroli pliku „do sprawdzenia" (20 s) - oba można zmienić w oknie raportu.
 - Czas odczytu AI jest zapisywany w sesji od tej wersji. W starszych sesjach brak go - raport pokaże szacunek (oznaczony) albo wpiszesz czas ręcznie.
 - Ścieżki folderów nie trafiają do raportu; nazwy plików wymagających uwagi tylko po zaznaczeniu opcji.
+
+## Modele, foldery i nazwa sesji
+
+- Zakładka *API i model*: lista modeli ma filtr *Rodzaj modeli* (czytające skany, tekstowe, audio/głos, embeddings, generowanie obrazu/wideo, wszystkie) oraz opcję *tylko darmowe* — także dla Gemini (tam wg nazwy modelu, to przybliżenie). Ostatnio używane modele są na górze listy, podświetlone.
+- *Zapisz sesję jako…* proponuje nazwę „Tytuł - 1970-1979” (najczęstszy tytuł i dominująca dekada) i otwiera ostatnio używany folder sesji.
+- Program pamięta foldery, z których importowano skany (w sesji i globalnie); okno wyboru folderu/plików startuje w ostatnim z nich.
+- Menu *Plik* nazywa się teraz *Sesja*; eksport do CSV/Excela jest w *Narzędziach*.
 
 ## Zmiana nazw
 
@@ -316,7 +323,7 @@ pokazuje przykłady; każdą operację można cofnąć.
 
 ## Import raportów CSV z innego programu
 
-*Plik → Importuj raporty CSV…* wczytuje raporty dat (np. `raport_dat.csv`) — jeden albo
+*Sesja → Importuj raporty CSV…* wczytuje raporty dat (np. `raport_dat.csv`) — jeden albo
 wiele naraz, nazwy dowolne. Kolejne importy dokładają wiedzę do poprzednich.
 Wymagana jest kolumna `data_koncowa` oraz co najmniej jedna z `skrot`, `sciezka`, `plik`.
 
@@ -378,7 +385,7 @@ Zmiana nazw to jedyna operacja dotykająca Twoich plików; odczyt AI nigdy ich n
 
 ## Eksport
 
-*Plik → Eksport do CSV / do Excela* (gdy brakuje biblioteki `openpyxl`, program proponuje
+*Narzędzia → Eksport do CSV / do Excela* (gdy brakuje biblioteki `openpyxl`, program proponuje
 ją doinstalować albo zapisuje CSV) zapisuje wszystkie kolumny, jakie program przechowuje:
 obok daty i numeru także język, datę w oryginalnym brzmieniu, nazwę miesiąca, informację
 czy rok był nadrukowany, pewność, datę i numer według AI, powód weryfikacji, użyty model,
@@ -414,7 +421,7 @@ Ta ostatnia pozwala ustalić, czy błąd zawinił model, czy parser.
 1. Nowa sesja → tryb (i strona dla AI w kolekcji wydań).
 2. Puść 20–30 plików, obejrzyj wyniki i porównaj z miniaturami.
 3. Dopiero potem ruszaj z całością — podpowiedź przed startem pokaże, czy wystarczy limitu.
-4. Jeśli masz raporty z innego programu — *Plik → Importuj raporty CSV…* (do porównania).
+4. Jeśli masz raporty z innego programu — *Sesja → Importuj raporty CSV…* (do porównania).
 5. *Weryfikuj* — żółte rekordy przejdź ręcznie (Enter, P). Trudne można najpierw
    *Ponowić odczytem AI* z obrazem dokładnym albo innym modelem.
 6. Eksportuj do Excela jako kopię bezpieczeństwa.

@@ -36,7 +36,7 @@ from config import (ALL_EXT, APP_DIR, APP_NAME, APP_VERSION, BATCH_SIZE, CACHE_D
                     FREE_RPM, PROVIDERS, SESSION_EXT,
                     load_config, save_config)
 from assess import MODE_ISSUES, MODE_PAGES, MODES
-from gemini_client import FALLBACK_MODELS, GeminiClient
+from gemini_client import FALLBACK_MODELS, GeminiClient, is_free_guess
 from openrouter_client import FatalApiError, OpenRouterClient
 from prompt import DEFAULT_RULES
 
@@ -48,6 +48,11 @@ PROVIDER_CFG = {
 from worker import ReadWorker
 
 CHECK_ON, CHECK_OFF = "\u2611", "\u2610"
+
+
+MODEL_KINDS = [("obrazy (czytaja skany)", "obrazy"), ("tekst", "tekst"),
+               ("audio / glos", "audio"), ("embeddings", "embeddings"),
+               ("generowanie obrazu / wideo", "generowanie"), ("wszystkie", "wszystkie")]
 
 
 def fmt_time(seconds: float) -> str:
@@ -109,6 +114,7 @@ class App(tk.Tk):
         self._iid_seq = 0
         self.session_path: str | None = None
         self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0}
+        self.import_dirs: list[str] = []
         self.dirty = False
 
         self.worker: ReadWorker | None = None
@@ -137,6 +143,7 @@ class App(tk.Tk):
         self.var_rpd = tk.IntVar(value=0)
         self.var_cache = tk.BooleanVar(value=bool(self.cfg.get("use_cache", True)))
         self.var_only_free = tk.BooleanVar(value=bool(self.cfg.get("only_free", True)))
+        self.var_model_kind = tk.StringVar(value=self.cfg.get("model_kind") or MODEL_KINDS[0][0])
         self.var_title_override = tk.StringVar(value="")
         self.var_filter = tk.StringVar(value="wszystkie")
         self.var_conf = tk.StringVar(value="dowolna")
@@ -172,11 +179,8 @@ class App(tk.Tk):
         f.add_separator()
         f.add_command(label="Importuj raporty CSV...", command=self.import_reports)
         f.add_separator()
-        f.add_command(label="Eksport do CSV...", command=self.export_csv)
-        f.add_command(label="Eksport do Excela...", command=self.export_xlsx)
-        f.add_separator()
         f.add_command(label="Zakoncz", command=self.on_close)
-        m.add_cascade(label="Plik", menu=f)
+        m.add_cascade(label="Sesja", menu=f)
 
         p = tk.Menu(m, tearoff=0)
         p.add_command(label="Dodaj folder...", command=lambda: self.add_folder(False))
@@ -205,6 +209,9 @@ class App(tk.Tk):
         t.add_command(label="Zuzycie limitow AI (liczniki programu)", command=self.show_usage)
         t.add_command(label="Statystyki", command=self.show_stats)
         t.add_command(label="Raport HTML z tej sesji...", command=self.make_report)
+        t.add_separator()
+        t.add_command(label="Eksport do CSV...", command=self.export_csv)
+        t.add_command(label="Eksport do Excela...", command=self.export_xlsx)
         m.add_cascade(label="Narzedzia", menu=t)
 
         w = tk.Menu(m, tearoff=0)
@@ -425,22 +432,28 @@ class App(tk.Tk):
         row2 = ttk.Frame(box2)
         row2.pack(fill="x", padx=8, pady=6)
         ttk.Button(row2, text="Pobierz liste modeli", command=self.fetch_models).pack(side="left")
-        self.chk_only_free = ttk.Checkbutton(row2, text="tylko darmowe (:free)",
+        self.chk_only_free = ttk.Checkbutton(row2, text="tylko darmowe",
                                              variable=self.var_only_free, command=self.fetch_models)
         self.chk_only_free.pack(side="left", padx=10)
-        ttk.Label(row2, text="(lista zawsze ograniczona do modeli przyjmujacych obrazy)",
-                  foreground="#555").pack(side="left")
+        ttk.Label(row2, text="Rodzaj modeli:").pack(side="left", padx=(10, 4))
+        self.cb_kind = ttk.Combobox(row2, textvariable=self.var_model_kind, state="readonly",
+                                    width=30, values=[k[0] for k in MODEL_KINDS])
+        self.cb_kind.pack(side="left")
+        self.cb_kind.bind("<<ComboboxSelected>>", lambda e: self.fetch_models())
+        self.lbl_kind_hint = ttk.Label(row2, text="", foreground="#555")
+        self.lbl_kind_hint.pack(side="left", padx=8)
 
-        cols = ("id", "name", "ctx", "free")
+        cols = ("id", "name", "ctx", "free", "kind")
         self.tree_models = ttk.Treeview(box2, columns=cols, show="headings", height=12)
-        for c, h, w in (("id", "ID modelu", 330), ("name", "Nazwa", 280),
-                        ("ctx", "Kontekst", 90), ("free", "Darmowy", 80)):
+        for c, h, w in (("id", "ID modelu", 300), ("name", "Nazwa", 250),
+                        ("ctx", "Kontekst", 80), ("free", "Darmowy", 90), ("kind", "Rodzaj", 110)):
             self.tree_models.heading(c, text=h)
             self.tree_models.column(c, width=w, anchor="w" if c in ("id", "name") else "center")
         vsb2 = ttk.Scrollbar(box2, orient="vertical", command=self.tree_models.yview)
         self.tree_models.configure(yscroll=vsb2.set)
         self.tree_models.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
         vsb2.pack(side="left", fill="y", pady=6, padx=(0, 8))
+        self.tree_models.tag_configure("recent", background="#fff4cc")
         self.tree_models.bind("<Double-1>", lambda e: self.choose_model())
 
         row3 = ttk.Frame(self.tab_api)
@@ -506,14 +519,16 @@ class App(tk.Tk):
         self.lbl_counts = ttk.Label(bar, text="Wgrane: 0  ·  widoczne: 0  ·  zaznaczone: 0",
                                     font=("TkDefaultFont", 9, "bold"), anchor="w")
         self.lbl_counts.pack(side="left", padx=(0, 18))
-        self.lbl_op = ttk.Label(bar, text="Gotowy", width=30, anchor="w")
+        self.lbl_op = ttk.Label(bar, text="Gotowy", width=40, anchor="w")
         self.lbl_op.pack(side="left")
-        self.pb = ttk.Progressbar(bar, mode="determinate", maximum=100, length=340)
+        self.prog_frame = ttk.Frame(bar)          # widoczny tylko w trakcie operacji
+        self.pb = ttk.Progressbar(self.prog_frame, mode="determinate", maximum=100, length=340)
         self.pb.pack(side="left", padx=6)
-        self.lbl_pct = ttk.Label(bar, text="0%", width=6, anchor="w")
+        self.lbl_pct = ttk.Label(self.prog_frame, text="0%", width=6, anchor="w")
         self.lbl_pct.pack(side="left")
-        self.lbl_time = ttk.Label(bar, text="", anchor="w")
+        self.lbl_time = ttk.Label(self.prog_frame, text="", anchor="w")
         self.lbl_time.pack(side="left", padx=8)
+        self._prog_gen = 0
         self.lbl_status = ttk.Label(bar, text="", anchor="e")
         self.lbl_status.pack(side="right")
 
@@ -543,6 +558,10 @@ class App(tk.Tk):
     def set_progress(self, done: int, total: int, op: str = "", elapsed: float | None = None):
         total = max(1, total)
         pct = min(100, int(done * 100 / total))
+        self._prog_gen += 1
+        self._last_total = total
+        if not self.prog_frame.winfo_ismapped():
+            self.prog_frame.pack(side="left")
         self.pb["value"] = pct
         self.lbl_pct.config(text=f"{pct}%")
         self.lbl_op.config(text=f"{op} {done}/{total}" if op else f"{done}/{total}")
@@ -565,10 +584,7 @@ class App(tk.Tk):
         t0 = time.time()
         self._bg_indeterminate = indeterminate
         if indeterminate:
-            self.lbl_op.config(text=f"{op}...")
-            self.lbl_pct.config(text="")
-            self.pb.config(mode="indeterminate")
-            self.pb.start(15)
+            self.lbl_op.config(text=f"{op}...")      # sam licznik, bez paska
         else:
             self.set_progress(0, 1, op)
 
@@ -589,10 +605,18 @@ class App(tk.Tk):
         return True
 
     def clear_progress(self):
+        self._prog_gen += 1
+        self.prog_frame.pack_forget()
         self.pb["value"] = 0
         self.lbl_pct.config(text="0%")
         self.lbl_op.config(text="Gotowy")
         self.lbl_time.config(text="")
+
+    def finish_progress(self, total: int, op: str = ""):
+        """Krotko pokazuje 100%, potem chowa pasek (o ile w miedzyczasie nie ruszyla nowa operacja)."""
+        self.set_progress(total, total, op)
+        gen = self._prog_gen
+        self.after(900, lambda: self.clear_progress() if self._prog_gen == gen else None)
 
     def mark_dirty(self, flag: bool = True):
         self.dirty = flag
@@ -600,20 +624,40 @@ class App(tk.Tk):
         self.title(f"{APP_NAME} {APP_VERSION} - {name}{' *' if flag else ''}")
 
     # =============================================================== lista plikow
+    def _import_start_dir(self) -> str | None:
+        """Od ostatnio uzytego folderu importu (z tej sesji, potem z poprzednich)."""
+        for d in list(self.import_dirs) + list(self.cfg.get("import_dirs") or []):
+            if d and Path(d).is_dir():
+                return d
+        return None
+
+    def _remember_import_dir(self, folder: str):
+        folder = str(folder)
+        self.import_dirs = [folder] + [d for d in self.import_dirs if d != folder]
+        self.import_dirs = self.import_dirs[:10]
+        glob = [d for d in (self.cfg.get("import_dirs") or []) if d != folder]
+        self.cfg["import_dirs"] = ([folder] + glob)[:10]
+        save_config(self.cfg)
+
     def add_folder(self, recursive: bool):
-        folder = filedialog.askdirectory(title="Wskaz folder ze skanami")
+        kw = {"initialdir": self._import_start_dir()} if self._import_start_dir() else {}
+        folder = filedialog.askdirectory(title="Wskaz folder ze skanami", **kw)
         if not folder:
             return
         base = Path(folder)
+        self._remember_import_dir(folder)
         self.set_status("Skanowanie folderu...")
 
         def work(prog):
-            it = base.rglob("*") if recursive else base.glob("*")
+            # os.walk daje typ wpisu bez osobnego zapytania do dysku o kazdy plik
             found = []
-            for p in it:
-                if p.is_file() and p.suffix.lower() in ALL_EXT:
-                    found.append(p)
-                    prog(len(found), 0)
+            for root, _dirs, files in os.walk(base):
+                for f in files:
+                    if os.path.splitext(f)[1].lower() in ALL_EXT:
+                        found.append(Path(root) / f)
+                prog(len(found), 0)
+                if not recursive:
+                    break
             return found
 
         def done(found, err):
@@ -625,11 +669,13 @@ class App(tk.Tk):
         self._run_bg("Skanowanie folderu", work, done, indeterminate=True)
 
     def add_files(self):
+        kw = {"initialdir": self._import_start_dir()} if self._import_start_dir() else {}
         paths = filedialog.askopenfilenames(
-            title="Wybierz pliki",
+            title="Wybierz pliki", **kw,
             filetypes=[("Skany (PDF i obrazy)", "*.pdf *.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp"),
                        ("Wszystkie pliki", "*.*")])
         if paths:
+            self._remember_import_dir(str(Path(paths[0]).parent))
             self._add_paths([Path(p) for p in paths])
 
     def _add_paths(self, paths: list[Path]):
@@ -669,7 +715,7 @@ class App(tk.Tk):
             self._bg_busy = False
             self.log(f"Dodano {total} plikow (lacznie {len(self.records)}). "
                      f"Wzorce nazw: {self.pattern_summary(added)}")
-            self.clear_progress()
+            self.finish_progress(total, "Import")
             self.refresh_tree()
             self.mark_dirty()
             self.autofit_columns()
@@ -1219,12 +1265,13 @@ class App(tk.Tk):
                 "Klucz: aistudio.google.com/apikey. Darmowe limity zaleza od modelu "
                 "(Flash-Lite ma ich najwiecej); aktualne pokazuje AI Studio.\n"
                 "Odpowiedz ma wymuszony format JSON, wiec rzadziej sie psuje."))
-            self.chk_only_free.state(["disabled"])
+            self.lbl_kind_hint.config(text="(darmowe wg nazwy modelu - to przyblizenie, "
+                                           "odpowiedzialnosc po stronie uzytkownika)")
         else:
             self.lbl_provider_hint.config(text=(
                 "Klucz: openrouter.ai/keys. Darmowo 50 zapytan/dzien, "
                 "po jednorazowym zakupie 10 kredytow 1000/dzien."))
-            self.chk_only_free.state(["!disabled"])
+            self.lbl_kind_hint.config(text="")
         self._refresh_saved_keys()
         custom = bool((self.cfg.get("prompt_rules") or "").strip())
         notes = bool((self.cfg.get("collection_notes") or "").strip())
@@ -1238,6 +1285,7 @@ class App(tk.Tk):
             "batch_size": int(self.var_batch.get()),
             "use_cache": bool(self.var_cache.get()),
             "only_free": bool(self.var_only_free.get()),
+            "model_kind": self.var_model_kind.get(),
         })
         save_config(self.cfg)
         self._refresh_saved_keys()
@@ -1273,36 +1321,63 @@ class App(tk.Tk):
         self.log("Test klucza: OK. " + txt.replace("\n", " | "))
         self.set_status("Klucz poprawny.")
 
+    def _kind_key(self) -> str:
+        label = self.var_model_kind.get()
+        return next((k for t, k in MODEL_KINDS if t == label), "obrazy")
+
+    def _recent_models(self) -> list[str]:
+        return list(self.cfg.get(f"recent_models_{self.var_provider.get()}") or [])
+
+    def _touch_recent_model(self, model_id: str):
+        if not model_id:
+            return
+        key = f"recent_models_{self.var_provider.get()}"
+        lst = [m for m in (self.cfg.get(key) or []) if m != model_id]
+        self.cfg[key] = ([model_id] + lst)[:10]
+        save_config(self.cfg)
+
     def fetch_models(self):
         self.set_status("Pobieram liste modeli...")
         self.update_idletasks()
         gemini = self.var_provider.get() == "gemini"
+        kind = self._kind_key()
+        only_free = self.var_only_free.get()
         rows, err = [], None
         try:
             if gemini:
-                for m in self._client().vision_models():
-                    rows.append((m["id"], m.get("displayName", ""),
-                                 m.get("inputTokenLimit", ""), "wg AI Studio"))
+                for m in self._client().models(kind):
+                    free = is_free_guess(m["id"])
+                    if only_free and not free:
+                        continue
+                    rows.append((m["id"], m.get("displayName", ""), m.get("inputTokenLimit", ""),
+                                 "chyba tak" if free else "raczej nie", m.get("kind", "")))
             else:
-                for m in OpenRouterClient(self.var_key.get().strip()).vision_models(
-                        only_free=self.var_only_free.get()):
+                for m in OpenRouterClient(self.var_key.get().strip()).models(kind, only_free=only_free):
                     rows.append((m.get("id", ""), m.get("name", ""), m.get("context_length", ""),
-                                 "tak" if OpenRouterClient.is_free(m) else "nie"))
+                                 "tak" if OpenRouterClient.is_free(m) else "nie", m.get("kind", "")))
         except Exception as exc:
             err = exc
         if err is not None and gemini:
             # bez listy tez da sie pracowac - pokazujemy modele zapasowe
-            rows = [(m, "(lista zapasowa)", "", "") for m in FALLBACK_MODELS]
+            rows = [(m, "(lista zapasowa)", "", "", "obrazy") for m in FALLBACK_MODELS]
             self.log(f"Nie udalo sie pobrac listy modeli Gemini ({err}) - pokazuje liste zapasowa.")
         elif err is not None:
             messagebox.showerror(APP_NAME, f"Nie udalo sie pobrac listy modeli:\n{err}")
             self.set_status("Blad pobierania modeli.")
             return
+        # ostatnio uzywane na gorze (w kolejnosci uzycia), reszta bez zmian
+        recent = self._recent_models()
+        order = {m: i for i, m in enumerate(recent)}
+        rows.sort(key=lambda r: order.get(r[0], len(order)))
         self.tree_models.delete(*self.tree_models.get_children())
         for values in rows:
-            self.tree_models.insert("", "end", values=values)
-        self.log(f"Pobrano {len(rows)} modeli obslugujacych obrazy"
-                 f"{' (tylko darmowe)' if self.var_only_free.get() and not gemini else ''}.")
+            is_recent = values[0] in order
+            vals = list(values)
+            if is_recent:
+                vals[1] = (str(vals[1]) + "  [ostatnio uzywany]").strip()
+            self.tree_models.insert("", "end", values=vals, tags=("recent",) if is_recent else ())
+        self.log(f"Pobrano {len(rows)} modeli (rodzaj: {self.var_model_kind.get()}"
+                 f"{', tylko darmowe' if only_free else ''}).")
         self.set_status(f"Znaleziono {len(rows)} pasujacych modeli.")
 
     def choose_model(self):
@@ -1314,6 +1389,7 @@ class App(tk.Tk):
         self._store_limits()
         self.var_model.set(model_id)
         self._load_limits()
+        self._touch_recent_model(model_id)
         self.save_key()
         self.log(f"Wybrano model: {model_id}")
 
@@ -1366,6 +1442,7 @@ class App(tk.Tk):
             if not messagebox.askyesno(APP_NAME, "\n".join(lines) + "\n\nRozpoczac?"):
                 return
 
+        self._touch_recent_model(self.var_model.get().strip())
         for r in todo:
             r["_pending"] = True      # zdejmowane, gdy przyjdzie wynik tego pliku
         self._set_running(True)
@@ -1437,11 +1514,12 @@ class App(tk.Tk):
                 self.set_progress(data["done"], data["total"], data["op"], data["elapsed"])
         elif kind == "bg_done":
             self._bg_busy = False
-            if getattr(self, "_bg_indeterminate", False):
-                self.pb.stop()
-                self.pb.config(mode="determinate")
-                self._bg_indeterminate = False
-            self.clear_progress()
+            was_text_only = getattr(self, "_bg_indeterminate", False)
+            self._bg_indeterminate = False
+            if was_text_only:
+                self.clear_progress()
+            else:
+                self.finish_progress(getattr(self, "_last_total", 1), getattr(self, "_bg_op", ""))
             data["cb"](data["res"], data["err"])
         elif kind == "report_progress":
             self.set_progress(data["done"], data["total"], data["op"])
@@ -1487,6 +1565,10 @@ class App(tk.Tk):
                    f"z cache {data['from_cache']}, czas {fmt_time(data['elapsed'])}.")
             self.log(msg)
             self.set_status(msg)
+            if data["stopped"]:
+                self.clear_progress()
+            else:
+                self.finish_progress(data["total"], "Odczyt AI")
             rs = self.run_stats
             rs["ai_seconds"] = float(rs.get("ai_seconds") or 0) + float(data["elapsed"])
             rs["ai_sent"] = int(rs.get("ai_sent") or 0) + int(data["done"])
@@ -1900,6 +1982,7 @@ class App(tk.Tk):
         self.records = []
         self.session_path = None
         self.session_patterns = []
+        self.import_dirs = []
         self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0}
         self.mode, self.page_index = choice
         self._update_mode_label()
@@ -1938,6 +2021,7 @@ class App(tk.Tk):
         path = str(Path(path).resolve())
         lst = [p for p in self.cfg.get("recent_sessions", []) if p != path]
         self.cfg["recent_sessions"] = [path] + lst[:9]
+        self.cfg["last_session_dir"] = str(Path(path).parent)
         save_config(self.cfg)
 
     def _build_recent_menu(self):
@@ -1953,6 +2037,9 @@ class App(tk.Tk):
                                          command=lambda p=p: self._open_recent(p))
 
     def _session_dir(self) -> str:
+        last = self.cfg.get("last_session_dir")
+        if last and Path(last).is_dir():
+            return last
         recent = self._recent_sessions()
         if recent:
             return str(Path(recent[0]).parent)
@@ -1961,7 +2048,7 @@ class App(tk.Tk):
         return str(Path.home())
 
     def default_session_name(self) -> str:
-        """'France Football - 2026-09-30 - 01-37' - tytul najczestszy na liscie."""
+        """'Jornal do Brasil (RJ) - 1970-1979' - najczestszy tytul i dominujaca dekada."""
         title = self.var_title_override.get().strip()
         if not title:
             counts: dict[str, int] = {}
@@ -1971,7 +2058,16 @@ class App(tk.Tk):
                     counts[t] = counts.get(t, 0) + 1
             title = max(counts, key=counts.get) if counts else "Sesja"
         title = re.sub(r'[\\/:*?"<>|]+', "-", title).strip(" .") or "Sesja"
-        return f"{title} - {time.strftime('%Y-%m-%d - %H-%M')}"
+        decades: dict[int, int] = {}
+        for r in self.records:
+            m = re.match(r"(\d{4})-", r.get("date_iso") or "")
+            year = int(m.group(1)) if m else (r.get("name_data") or {}).get("year")
+            if year:
+                decades[int(year) // 10 * 10] = decades.get(int(year) // 10 * 10, 0) + 1
+        if decades:
+            d = max(decades, key=decades.get)
+            return f"{title} - {d}-{d + 9}"
+        return title
 
     def _load_session(self, path: str):
         try:
@@ -1989,6 +2085,12 @@ class App(tk.Tk):
         self.session_patterns = list(meta.get("patterns") or [])
         self.run_stats = {"ai_seconds": 0.0, "ai_sent": 0, "ai_cache": 0, "runs": 0,
                           **(meta.get("run_stats") or {})}
+        self.import_dirs = list(meta.get("import_dirs") or [])
+        if not self.import_dirs:
+            # starsza sesja: foldery najczesciej wystepujace w sciezkach plikow
+            from collections import Counter
+            cnt = Counter(str(Path(r.get("path", "")).parent) for r in self.records if r.get("path"))
+            self.import_dirs = [d for d, _ in cnt.most_common(5)]
         mode = meta.get("mode")
         page = int(meta.get("page") or 1) - 1
         if mode not in MODES:
@@ -2076,6 +2178,7 @@ class App(tk.Tk):
                 "page": self.page_index + 1,
                 "title_override": self.var_title_override.get(),
                 "run_stats": self.run_stats,
+                "import_dirs": self.import_dirs,
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         try:
             session_io.save_session(path, self.records, meta)

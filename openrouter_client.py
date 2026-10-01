@@ -53,6 +53,31 @@ class OpenRouterClient(BaseClient):
         # starsze wpisy API opisuja to inaczej
         return "image" in str(arch.get("modality", "")).lower()
 
+    @staticmethod
+    def kind_of(m: dict) -> str:
+        arch = m.get("architecture") or {}
+        ins = [str(x).lower() for x in (arch.get("input_modalities") or [])]
+        outs = [str(x).lower() for x in (arch.get("output_modalities") or [])]
+        if "image" in outs and "text" not in outs:
+            return "generowanie"
+        if OpenRouterClient.supports_images(m):
+            return "obrazy"
+        if "audio" in ins:
+            return "audio"
+        return "tekst"
+
+    def models(self, kind: str = "obrazy", only_free: bool = True) -> list[dict]:
+        out = []
+        for m in self.list_models():
+            m["kind"] = self.kind_of(m)
+            if kind != "wszystkie" and m["kind"] != kind:
+                continue
+            if only_free and not self.is_free(m):
+                continue
+            out.append(m)
+        out.sort(key=lambda m: str(m.get("id", "")))
+        return out
+
     def vision_models(self, only_free: bool = True) -> list[dict]:
         out = []
         for m in self.list_models():
