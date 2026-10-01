@@ -503,7 +503,10 @@ class App(tk.Tk):
         bar = ttk.Frame(self)
         bar.pack(fill="x", side="bottom", padx=6, pady=4)
 
-        self.lbl_op = ttk.Label(bar, text="", width=30, anchor="w")
+        self.lbl_counts = ttk.Label(bar, text="Wgrane: 0  ·  widoczne: 0  ·  zaznaczone: 0",
+                                    font=("TkDefaultFont", 9, "bold"), anchor="w")
+        self.lbl_counts.pack(side="left", padx=(0, 18))
+        self.lbl_op = ttk.Label(bar, text="Gotowy", width=30, anchor="w")
         self.lbl_op.pack(side="left")
         self.pb = ttk.Progressbar(bar, mode="determinate", maximum=100, length=340)
         self.pb.pack(side="left", padx=6)
@@ -551,7 +554,7 @@ class App(tk.Tk):
         elif elapsed is not None:
             self.lbl_time.config(text=f"uplynelo {fmt_time(elapsed)}")
 
-    def _run_bg(self, op: str, work, on_done):
+    def _run_bg(self, op: str, work, on_done, indeterminate: bool = False):
         """Dlugie zadanie w watku tla: pasek postepu zyje, okno nie zamarza.
         work(progress) -> wynik; on_done(wynik, wyjatek) wola sie w watku GUI."""
         if getattr(self, "_bg_busy", False):
@@ -560,10 +563,17 @@ class App(tk.Tk):
         self._bg_busy = True
         self._bg_op = op
         t0 = time.time()
-        self.set_progress(0, 1, op)
+        self._bg_indeterminate = indeterminate
+        if indeterminate:
+            self.lbl_op.config(text=f"{op}...")
+            self.lbl_pct.config(text="")
+            self.pb.config(mode="indeterminate")
+            self.pb.start(15)
+        else:
+            self.set_progress(0, 1, op)
 
         def prog(i, total):
-            step = max(1, total // 200)
+            step = max(1, (total or 200) // 200)
             if i % step == 0 or i == total:
                 self.queue.put(("bg_progress", {"done": i, "total": total, "op": op,
                                                 "elapsed": time.time() - t0}))
@@ -581,7 +591,7 @@ class App(tk.Tk):
     def clear_progress(self):
         self.pb["value"] = 0
         self.lbl_pct.config(text="0%")
-        self.lbl_op.config(text="")
+        self.lbl_op.config(text="Gotowy")
         self.lbl_time.config(text="")
 
     def mark_dirty(self, flag: bool = True):
@@ -599,7 +609,12 @@ class App(tk.Tk):
 
         def work(prog):
             it = base.rglob("*") if recursive else base.glob("*")
-            return [p for p in it if p.is_file() and p.suffix.lower() in ALL_EXT]
+            found = []
+            for p in it:
+                if p.is_file() and p.suffix.lower() in ALL_EXT:
+                    found.append(p)
+                    prog(len(found), 0)
+            return found
 
         def done(found, err):
             if err:
@@ -607,7 +622,7 @@ class App(tk.Tk):
                 return
             self._add_paths(found)
 
-        self._run_bg("Skanowanie", work, done)
+        self._run_bg("Skanowanie folderu", work, done, indeterminate=True)
 
     def add_files(self):
         paths = filedialog.askopenfilenames(
@@ -767,6 +782,7 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=iid, values=self._row_values(r),
                              tags=self._row_tags(r))
         self.update_verify_button()
+        self.update_counts()
         self.cmap.set_records(self.records)
         checked = sum(1 for r in self.records if r.get("checked"))
         self.set_status(f"{len(self.records)} plikow, zaznaczonych {checked}, "
@@ -783,8 +799,14 @@ class App(tk.Tk):
 
     def _refresh_counts(self):
         self._counts_pending = False
+        self.update_counts()
         self.update_verify_button()
         self.cmap.redraw()
+
+    def update_counts(self):
+        checked = sum(1 for r in self.records if r.get("checked"))
+        self.lbl_counts.config(text=f"Wgrane: {len(self.records)}  ·  widoczne: {len(self.by_iid)}"
+                                    f"  ·  zaznaczone: {checked}")
 
     def update_verify_button(self):
         n = sum(1 for r in self.records if needs_check(r))
@@ -1409,9 +1431,16 @@ class App(tk.Tk):
 
     def _handle_event(self, kind: str, data: dict):
         if kind == "bg_progress":
-            self.set_progress(data["done"], data["total"], data["op"], data["elapsed"])
+            if getattr(self, "_bg_indeterminate", False):
+                self.lbl_op.config(text=f"{data['op']}: znaleziono {data['done']}")
+            else:
+                self.set_progress(data["done"], data["total"], data["op"], data["elapsed"])
         elif kind == "bg_done":
             self._bg_busy = False
+            if getattr(self, "_bg_indeterminate", False):
+                self.pb.stop()
+                self.pb.config(mode="determinate")
+                self._bg_indeterminate = False
             self.clear_progress()
             data["cb"](data["res"], data["err"])
         elif kind == "report_progress":
@@ -1783,7 +1812,7 @@ class App(tk.Tk):
 
         override = self.var_title_override.get().strip()
         self.set_status("Planowanie zmiany nazw...")
-        self._run_bg("Planowanie", lambda prog: rename_ops.plan_renames(todo, override),
+        self._run_bg("Planowanie", lambda prog: rename_ops.plan_renames(todo, override, progress=prog),
                      lambda res, err: self._rename_planned(res, err))
 
     def _rename_planned(self, res, err):

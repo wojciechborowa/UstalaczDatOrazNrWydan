@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from config import RENAME_LOG_DIR, ensure_dirs
 from naming import build_new_name, resolve_collision
 
 
-def plan_renames(records: list[dict], title_override: str = "") -> tuple[list[dict], list[dict]]:
+def plan_renames(records: list[dict], title_override: str = "",
+                 progress=None) -> tuple[list[dict], list[dict]]:
     """Zwraca (plan, pominiete). Nie dotyka dysku."""
     plan: list[dict] = []
     skipped: list[dict] = []
     taken: set[str] = set()
 
-    for rec in records:
+    total = len(records)
+    for i, rec in enumerate(records, start=1):
+        if progress:
+            progress(i, total)
         src = Path(rec.get("path", ""))
         if not src.exists():
             skipped.append({"rec": rec, "reason": "plik nie istnieje"})
@@ -34,28 +39,53 @@ def plan_renames(records: list[dict], title_override: str = "") -> tuple[list[di
     return plan, skipped
 
 
-def apply_renames(plan: list[dict], progress=None, should_stop=None) -> tuple[str, list[dict], list[dict]]:
-    """Wykonuje plan. Zwraca (sciezka_logu, wykonane, bledy)."""
+WORKERS = 8     # zmiana nazwy to operacja dyskowa - watki dobrze kryja opoznienia systemu/antywirusa
+
+
+def _rename_one(item: dict) -> str | None:
+    try:
+        Path(item["src"]).rename(item["dst"])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+
+
+def apply_renames(plan: list[dict], progress=None, should_stop=None,
+                  workers: int = WORKERS) -> tuple[str, list[dict], list[dict]]:
+    """Wykonuje plan na kilku watkach. Zwraca (sciezka_logu, wykonane, bledy).
+    Nazwy docelowe w planie sa unikalne, wiec zmiany nie wchodza sobie w droge."""
     ensure_dirs()
+    total = len(plan)
+    results: dict[int, str | None] = {}
+    finished = 0
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(_rename_one, item): idx for idx, item in enumerate(plan)}
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            finished += 1
+            if progress:
+                progress(finished, total)
+            if should_stop and should_stop():
+                for f in futures:
+                    f.cancel()
+                break
+
     done: list[dict] = []
     errors: list[dict] = []
-    total = len(plan)
-
-    for i, item in enumerate(plan, start=1):
-        if should_stop and should_stop():
-            break
-        try:
-            Path(item["src"]).rename(item["dst"])
+    for idx, item in enumerate(plan):     # log w kolejnosci planu
+        if idx not in results:
+            continue
+        err = results[idx]
+        if err is None:
             item["rec"]["path"] = item["dst"]
             item["rec"]["old_name"] = Path(item["dst"]).name
             item["rec"]["status"] = "zmieniono nazwe"
             done.append({"src": item["src"], "dst": item["dst"]})
-        except Exception as exc:
-            errors.append({"src": item["src"], "dst": item["dst"], "error": str(exc)})
+        else:
+            errors.append({"src": item["src"], "dst": item["dst"], "error": err})
             item["rec"]["status"] = "blad zmiany nazwy"
-            item["rec"]["note"] = str(exc)
-        if progress:
-            progress(i, total)
+            item["rec"]["note"] = err
 
     log_path = RENAME_LOG_DIR / f"rename_{time.strftime('%Y%m%d_%H%M%S')}.json"
     log_path.write_text(json.dumps(
